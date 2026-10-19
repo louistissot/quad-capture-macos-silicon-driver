@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Build the QuadCaptureMac test tools and the Core Audio plug-in (build/QuadCapture.driver).
+# Build the QuadCaptureMac test tools, the Core Audio plug-in (build/QuadCapture.driver), the CoreMIDI
+# driver (build/QuadCaptureMIDI.plugin) and the control panel app (build/QuadCapture Panel.app).
 # Universal binaries (arm64 + x86_64), macOS 12 or later.
 #   ./build.sh            build with the default SDK
 #   SDK=macosx15.4 ./build.sh   build with another installed SDK (to find APIs that are too new)
@@ -56,3 +57,6 @@ for B in $DRV $MID; do
 done
 echo "Built $DRV $VERSION ($(lipo -archs $DRV/Contents/MacOS/QuadCapture), macOS $MINOS+, SDK $(basename $SDKPATH))"
 echo "Built $MID $VERSION ($(lipo -archs $MID/Contents/MacOS/QuadCaptureMIDI))"
+
+# Control panel app (compressor, LO-CUT, PHASE, monitor mixer).
+src/panel/build_panel.sh

@@ -143,6 +143,7 @@ sudo rm -rf /Library/Audio/Plug-Ins/HAL/QuadCapture.driver && sudo cp -R build/Q
 | `build/qc_capture [-T]` | Low-level USB recorder and tone test. |
 | `build/qc_descriptors` | Prints the USB descriptors. |
 | `build/qc_sysex [-m seconds]` | Reads the control-panel settings of the device (SENS, compressor, mixer), or watches their changes. `-w` changes a setting. |
+| `build/QuadCapture Panel.app` | The control panel app: SENS, LO-CUT, PHASE, compressor, stereo link and monitor mixer of IN 1 and IN 2. It replaces the Roland control panel. Changes go to the device at once, and the device keeps them after a power cycle. |
 | `build/qc_rate [hz]` | Reads the sample rate of the device, or changes it (44100, 48000, 96000, 192000). Use it only while no app uses the QUAD-CAPTURE. |
 
 CAUTION: Before you use `-T`, set the volume of your speakers and headphones low.
