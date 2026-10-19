@@ -18,7 +18,7 @@ FW=(-framework Foundation -framework IOKit -framework IOUSBHost)
 
 clang $COMMON $OBJC -o build/qc_descriptors tools/qc_descriptors.m $FW
 clang $COMMON $OBJC -o build/qc_capture tools/qc_capture.m $FW
-clang $COMMON $OBJC -o build/qc_engine_test tools/qc_engine_test.m src/engine/qc_engine.m $FW -framework AudioToolbox
+clang $COMMON $OBJC -o build/qc_engine_test tools/qc_engine_test.m src/engine/qc_engine.m $FW
 clang $COMMON -o build/qc_hal_test tools/qc_hal_test.c -framework CoreAudio -framework CoreFoundation
 
 DRV=build/QuadCapture.driver
@@ -28,7 +28,7 @@ sed "s/@VERSION@/$VERSION/g" src/driver/Info.plist > $DRV/Contents/Info.plist
 clang $COMMON -x c -c -o build/qc_driver.o src/driver/qc_driver.c
 clang $COMMON $OBJC -c -o build/qc_engine.o src/engine/qc_engine.m
 clang $COMMON -bundle -o $DRV/Contents/MacOS/QuadCapture build/qc_driver.o build/qc_engine.o \
-    $FW -framework CoreAudio -framework CoreFoundation -framework AudioToolbox
+    $FW -framework CoreAudio -framework CoreFoundation
 rm -f build/qc_driver.o build/qc_engine.o
 if [[ -n "${SIGN_IDENTITY:-}" && "$SIGN_IDENTITY" != "-" ]]; then
     codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp $DRV   # for notarization

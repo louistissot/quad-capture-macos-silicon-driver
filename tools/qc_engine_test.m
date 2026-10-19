@@ -39,8 +39,8 @@ int main(int argc, char **argv) {
         NSString *outDir = [NSFileManager.defaultManager.currentDirectoryPath stringByAppendingPathComponent:@"recordings"];
         int ch, nReq = 0, tpr = 0;
         int outMargin = -1, inMargin = -1;
-        while ((ch = getopt(argc, argv, "s:To:n:t:m:i:R:")) != -1) {
-            if (ch == 'R') { qc_engine_set_scheduling(atoi(optarg)); continue; }
+        while ((ch = getopt(argc, argv, "s:To:n:t:m:i:d:")) != -1) {
+            if (ch == 'd') { qc_engine_set_direct(atoi(optarg)); continue; }
             if (ch == 's') seconds = atof(optarg);
             else if (ch == 'T') tone = true;
             else if (ch == 'o') outDir = @(optarg);
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
             else { fprintf(stderr, "usage: qc_engine_test [-s seconds] [-T] [-o dir] [-n requests] [-t microframes] [-m out_margin] [-i in_margin]\n"); return 2; }
         }
         if (nReq || tpr || outMargin >= 0 || inMargin >= 0)
-            qc_engine_configure(nReq ? nReq : 16, tpr ? tpr : 64, outMargin >= 0 ? outMargin : 500, inMargin >= 0 ? inMargin : 1183);
+            qc_engine_configure(nReq ? nReq : 32, tpr ? tpr : 32, outMargin >= 0 ? outMargin : 88, inMargin >= 0 ? inMargin : 88);
         const int64_t lead = qc_engine_output_lead_frames(), delay = qc_engine_input_delay_frames();
         printf("Output lead %lld frames (%.1f ms), input delay %lld frames (%.1f ms)\n", lead, lead / 44.1, delay, delay / 44.1);
         if (tone && seconds < 5.0) seconds = 5.0;
@@ -167,8 +167,8 @@ int main(int argc, char **argv) {
         for (int b = 0; b < QC_LAG_BUCKETS; b++) printf(" %s:%llu", bk[b], st.inLagHist[b]);
         printf("\n  playback:");
         for (int b = 0; b < QC_LAG_BUCKETS; b++) printf(" %s:%llu", bk[b], st.outLagHist[b]);
-        printf("\nResyncs: %llu, gap frames: %llu; callback thread priority %d, policy %d\n", st.resyncs, st.gapFrames,
-               st.callbackPriority, st.callbackPolicy);
+        printf("\nResyncs: %llu, gap frames: %llu; direct %llu, ring %llu, races %llu; callback priority %d, scanner priority %d\n",
+               st.resyncs, st.gapFrames, st.directFrames, st.ringFrames, st.races, st.callbackPriority, st.scannerPriority);
         printf("Input frames: %llu, missing: %llu, empty packets: %llu; output late: %llu; USB errors in/out: %llu/%llu\n",
                st.inputFrames, st.inputMissing, st.emptyPackets, st.outputLate, st.inErrors, st.outErrors);
         for (int c = 0; c < QC_IN_CHANNELS; c++) {

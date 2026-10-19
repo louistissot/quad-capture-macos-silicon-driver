@@ -17,10 +17,9 @@
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
 #import <IOUSBHost/IOUSBHost.h>
-#include <AudioToolbox/AudioWorkInterval.h>
 #include <mach/mach.h>
-#include <mach/mach_time.h>
 #include <mach/thread_policy.h>
+#include <mach/mach_time.h>
 #include <math.h>
 #include <os/log.h>
 #include <pthread.h>
@@ -54,13 +53,50 @@ typedef struct {
 static os_log_t gLog;
 static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;   // serializes configure, start and stop
 static dispatch_queue_t gQueue;
-static int gSchedMode = 0, gQueueMode = -1;
-static os_workgroup_interval_t gWorkgroup;
 static _Atomic int gCbPriority, gCbPolicy;
 
 // Configuration (changed only while the engine does not run).
-static int gNumReq = 16, gTpr = 16;               // 32 ms queue
-static uint32_t gOutMargin = 441, gInMargin = 441;  // 10 ms margins
+static int gNumReq = 32, gTpr = 32;              // 128 ms queue of 4 ms requests
+static uint32_t gOutMargin = 88, gInMargin = 88;   // 2 ms each
+static bool gDirectWrite = true;                   // the client writes playback into the queued requests
+static bool gDirectRead = true;                    // a real-time thread reads capture from the queued requests
+#define GUARD_MICROFRAMES 8                        // direct writes stop 1 ms before the transfer
+#define SCAN_DELAY_MICROFRAMES 2                   // the scanner reads a microframe 250 us after its end
+#define SCAN_PERIOD_US 1000                        // the scanner wakes each 1 ms
+#define SENTINEL 0x5AA5C33Cu                       // marks a capture frame slot that the device did not fill
+
+// Direct read: a map of each queued capture request, for the scanner thread.
+typedef struct {
+    _Atomic uint32_t seq;
+    bool valid;
+    uint64_t reqIndex;
+    uint64_t firstMicro;
+    const uint8_t *base;
+} InMap;
+static InMap gInMap[QC_MAX_REQUESTS];
+static uint64_t gInReqIndex;                       // USB queue: index of the next capture request
+static uint64_t gInSlotReq[QC_MAX_REQUESTS];       // USB queue: request index in each slot
+static _Atomic uint64_t gScanDoneReq;              // the scanner read all requests below this index
+static _Atomic uint64_t gStableReq, gStableMicro;  // first request and microframe of sample time 0
+static pthread_t gScanThread;
+static bool gScanThreadRunning;
+static atomic_bool gScanStop;
+static _Atomic int gScanPriority;
+
+// Direct write: a map of each queued playback request, for the client (real-time) thread.
+// The sequence number is odd while the USB queue changes the map.
+typedef struct {
+    _Atomic uint32_t seq;
+    bool valid;
+    int64_t firstT;                                // sample time of the first frame
+    uint32_t frames;
+    uint64_t firstMicro;                           // microframe of transaction 0
+    uint16_t cum[QC_MAX_MICROFRAMES + 1];          // frames before transaction i
+    uint8_t *base;                                 // the I/O buffer of the request
+} OutMap;
+static OutMap gOutMap[QC_MAX_REQUESTS];
+static _Atomic uint32_t gRefSeq;                   // seqlock for gRefMicro / gRefHost (read by the client)
+static _Atomic uint64_t gRefMicroA, gRefHostA;
 
 static IOUSBHostDevice *gDev;
 static IOUSBHostInterface *gIfOut, *gIfIn;
@@ -97,6 +133,7 @@ static _Atomic uint32_t gZSeq;
 static _Atomic int64_t gZSample;
 static _Atomic uint64_t gZHost, gZSeed = 1;
 static _Atomic uint64_t gStInputMissing, gStOutputLate, gStEmpty, gStInErr, gStOutErr, gStZero, gStResync, gStGap;
+static _Atomic uint64_t gStDirect, gStRing, gStRace;
 
 static float gInRing[QC_RING_FRAMES * QC_IN_CHANNELS];
 static float gOutRing[QC_RING_FRAMES * QC_OUT_CHANNELS];
@@ -166,11 +203,20 @@ static inline uint64_t hostOfMicro(uint64_t m) {
 // Update the (microframe, host time) pair. macOS 26: exact microframe time. Older macOS: the host time
 // of a frame-number read is inside that frame, so the frame start is smoothed over many reads; the
 // constant offset that stays (about 0.5 ms) does not change the clock rate.
+static void publishRef(void) {
+    uint32_t q = atomic_load_explicit(&gRefSeq, memory_order_relaxed);
+    atomic_store_explicit(&gRefSeq, q + 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    atomic_store_explicit(&gRefMicroA, gRefMicro, memory_order_relaxed);
+    atomic_store_explicit(&gRefHostA, gRefHost, memory_order_relaxed);
+    atomic_store_explicit(&gRefSeq, q + 2, memory_order_release);
+}
+
 static void refreshRef(IOUSBHostInterface *iface) {
     IOUSBHostTime t = 0;
     if (gHasMicroAPI) {
         uint64_t cur = [iface currentMicroframeWithTime:&t error:nil];
-        if (cur && t) { gRefMicro = cur; gRefHost = t; }
+        if (cur && t) { gRefMicro = cur; gRefHost = t; publishRef(); }
         return;
     }
     uint64_t f = [iface frameNumberWithTime:&t];
@@ -190,6 +236,24 @@ static void refreshRef(IOUSBHostInterface *iface) {
     }
     gRefMicro = f * 8;
     gRefHost = (uint64_t)(gFrameBoundaryEst + (double)f * ticksPerFrame);
+    publishRef();
+}
+
+static void loadRef(uint64_t *micro, uint64_t *host) {
+    for (;;) {
+        uint32_t a = atomic_load_explicit(&gRefSeq, memory_order_acquire);
+        if (a & 1) continue;
+        *micro = atomic_load_explicit(&gRefMicroA, memory_order_relaxed);
+        *host = atomic_load_explicit(&gRefHostA, memory_order_relaxed);
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&gRefSeq, memory_order_relaxed) == a) return;
+    }
+}
+
+static uint64_t hostOfMicroShared(uint64_t m) {
+    uint64_t rm, rh;
+    loadRef(&rm, &rh);
+    return (uint64_t)((double)rh + (double)((int64_t)m - (int64_t)rm) * gTicksPerMicro);
 }
 
 static uint32_t nominalFrames(uint32_t *acc, uint32_t microframes) {
@@ -208,6 +272,13 @@ static inline int32_t floatToSample(float v) {
 static void recordLag(uint64_t endMicro, double *maxMs, uint64_t *hist) {
     double ms = ((double)mach_absolute_time() - (double)hostOfMicro(endMicro)) * gNsPerTick * 1e-6;
     if (ms > *maxMs) *maxMs = ms;
+    // Log the start of each stall (callback later than 20 ms), at most one line per 100 ms.
+    static uint64_t lastLog;
+    uint64_t now = mach_absolute_time();
+    if (ms > 20.0 && (double)(now - lastLog) * gNsPerTick > 100e6) {
+        lastLog = now;
+        os_log(gLog, "stall: callback %.1f ms after the end of its request", ms);
+    }
     static const double edges[QC_LAG_BUCKETS - 1] = {0.5, 1, 2, 4, 8, 16, 32};
     int b = 0;
     while (b < QC_LAG_BUCKETS - 1 && ms >= edges[b]) b++;
@@ -216,7 +287,7 @@ static void recordLag(uint64_t endMicro, double *maxMs, uint64_t *hist) {
 
 // Append capture frames (or silence if src is NULL) that span `micros` microframes from microStart.
 // Publish the zero timestamps that fall inside, with the host time interpolated over the span.
-static void appendCapture(const int32_t *src, uint32_t frames, uint64_t microStart, uint32_t micros) {
+static void appendCapture(const int32_t *src, uint32_t frames, uint64_t microStart, uint32_t micros, bool shared) {
     if (frames == 0) return;
     for (uint32_t f = 0; f < frames; f++) {
         float *dst = &gInRing[((gS + f) & RING_MASK) * QC_IN_CHANNELS];
@@ -225,7 +296,8 @@ static void appendCapture(const int32_t *src, uint32_t frames, uint64_t microSta
     }
     while (gNextZero < gS + frames) {
         double frac = (double)(gNextZero - gS) / frames;
-        uint64_t h = hostOfMicro(microStart) + (uint64_t)(frac * micros * gTicksPerMicro);
+        uint64_t h = (shared ? hostOfMicroShared(microStart) : hostOfMicro(microStart)) +
+                     (uint64_t)(frac * micros * gTicksPerMicro);
         publishZero(gNextZero, h);
         gNextZero += QC_ZERO_PERIOD;
     }
@@ -235,22 +307,6 @@ static void appendCapture(const int32_t *src, uint32_t frames, uint64_t microSta
 
 static void enqueueIn(int slot);
 static void enqueueOut(int slot);
-
-// Mode 2: give the callback thread a real-time (time-constraint) policy, once for each thread.
-static void promoteThread(void) {
-    static __thread bool done;
-    if (gSchedMode < 2 || done) return;
-    done = true;
-    double ticksPerUs = 1000.0 / gNsPerTick;
-    thread_time_constraint_policy_data_t pol;
-    pol.period = (uint32_t)(gTpr * 125 * ticksPerUs);
-    pol.computation = (uint32_t)(200 * ticksPerUs);
-    pol.constraint = (uint32_t)(gTpr * 125 * ticksPerUs);
-    pol.preemptible = 1;
-    kern_return_t kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
-                                         THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-    if (kr != KERN_SUCCESS) os_log_error(gLog, "thread_policy_set failed: %d", kr);
-}
 
 static void sampleThread(void) {
     static uint32_t n;
@@ -265,74 +321,94 @@ static void sampleThread(void) {
     mach_port_deallocate(mach_task_self(), th);
 }
 
+static void reuseInSlot(int slot);
+
 static void onInDone(int slot, IOReturn status, IOUSBHostIsochronousTransaction *list) {
     gInFlightIn--;
     if (gStop || status == kIOReturnAborted) return;
-    promoteThread();
     sampleThread();
 
     refreshRef(gIfIn);
     const uint64_t slotMicro = gInSlotMicro[slot];
     recordLag(slotMicro + gTpr, &gInLagMax, gInLagHist);
 
-    bool stable = atomic_load_explicit(&gStable, memory_order_relaxed);
-    // Microframes skipped by a resync: put in silence, so sample time stays on the device clock.
-    if (stable && slotMicro > gInExpectMicro) {
-        uint32_t gap = (uint32_t)(slotMicro - gInExpectMicro);
-        uint32_t frames = nominalFrames(&gGapAcc, gap);
-        appendCapture(NULL, frames, gInExpectMicro, gap);
-        atomic_fetch_add_explicit(&gStGap, frames, memory_order_relaxed);
-    }
-    gInExpectMicro = slotMicro + gTpr;
-
+    const bool stable = atomic_load_explicit(&gStable, memory_order_relaxed);
     const uint32_t fb = gInFmt.channels * gInFmt.subframe;
-    const uint8_t *base = gInData[slot].bytes;
+    bool becameStable = false;
     for (int i = 0; i < gTpr; i++) {
-        uint64_t m = slotMicro + i;
         IOReturn st = list[i].status;
         uint32_t frames = 0;
-        bool ok = (st == kIOReturnSuccess || st == kIOReturnUnderrun);
-        if (ok) frames = list[i].completeCount / fb;
+        if (st == kIOReturnSuccess || st == kIOReturnUnderrun) frames = list[i].completeCount / fb;
         else atomic_fetch_add_explicit(&gStInErr, 1, memory_order_relaxed);
-
         // Implicit feedback: the size of each playback packet follows the size of a capture packet.
         if (((gFifoHead + 1) % FIFO_LEN) != gFifoTail) {
             gFifo[gFifoHead] = frames;
             gFifoHead = (gFifoHead + 1) % FIFO_LEN;
         }
-
-        if (!stable) {
+        if (!stable && !becameStable) {
             gConsec = frames ? gConsec + 1 : 0;
-            if (gConsec >= STABLE_MICROFRAMES) {
-                // Sample time 0 is the first frame of the next microframe.
-                uint64_t m0 = m + 1;
-                gS = 0;
-                gNextZero = QC_ZERO_PERIOD;
-                gZeroHost0 = hostOfMicro(m0);
-                atomic_store_explicit(&gInWritePos, 0, memory_order_release);
-                publishZero(0, gZeroHost0);
-                // Map the playback stream position to sample time: the next playback frame goes out at
-                // microframe gOutFillEndMicro, when the device is at about this sample time.
-                double expected = (double)((int64_t)gOutFillEndMicro - (int64_t)m0) * gOutFmt.rate / 8000.0;
-                gOutOffset = (int64_t)llround(expected) - gOutPos;
-                gOutMapped = true;
-                atomic_store_explicit(&gOutReadPos, gOutPos + gOutOffset, memory_order_release);
-                atomic_store_explicit(&gStable, true, memory_order_release);
-                stable = true;
-                os_log(gLog, "stream stable at microframe %llu; output offset %lld", m0, gOutOffset);
+            if (gConsec >= STABLE_MICROFRAMES) becameStable = true;
+        }
+    }
+
+    if (becameStable) {
+        // Sample time 0 is the first frame of the next request (its data is still in its buffer).
+        const uint64_t m0 = slotMicro + gTpr;
+        gS = 0;
+        gNextZero = QC_ZERO_PERIOD;
+        gInExpectMicro = m0;
+        atomic_store_explicit(&gInWritePos, 0, memory_order_release);
+        atomic_store_explicit(&gStableReq, gInSlotReq[slot] + 1, memory_order_relaxed);
+        atomic_store_explicit(&gStableMicro, m0, memory_order_relaxed);
+        if (!gDirectRead) {
+            gZeroHost0 = hostOfMicro(m0);
+            publishZero(0, gZeroHost0);
+        }
+        // Map the playback stream position to sample time: the next playback frame goes out at
+        // microframe gOutFillEndMicro, when the device is at about this sample time.
+        double expected = (double)((int64_t)gOutFillEndMicro - (int64_t)m0) * gOutFmt.rate / 8000.0;
+        gOutOffset = (int64_t)llround(expected) - gOutPos;
+        gOutMapped = true;
+        atomic_store_explicit(&gOutReadPos, gOutPos + gOutOffset, memory_order_release);
+        atomic_store_explicit(&gStable, true, memory_order_release);
+        os_log(gLog, "stream stable at microframe %llu; output offset %lld", m0, gOutOffset);
+    } else if (stable && !gDirectRead) {
+        // Callback path: the data of this request goes to the ring now.
+        if (slotMicro > gInExpectMicro) {
+            // Microframes skipped by a resync: put in silence, so sample time stays on the device clock.
+            uint32_t gap = (uint32_t)(slotMicro - gInExpectMicro);
+            uint32_t frames = nominalFrames(&gGapAcc, gap);
+            appendCapture(NULL, frames, gInExpectMicro, gap, false);
+            atomic_fetch_add_explicit(&gStGap, frames, memory_order_relaxed);
+        }
+        gInExpectMicro = slotMicro + gTpr;
+        const uint8_t *base = gInData[slot].bytes;
+        for (int i = 0; i < gTpr; i++) {
+            const uint64_t m = slotMicro + i;
+            IOReturn st = list[i].status;
+            if (st != kIOReturnSuccess && st != kIOReturnUnderrun) {
+                appendCapture(NULL, nominalFrames(&gGapAcc, 1), m, 1, false);   // lost packet: silence
+                continue;
             }
-            continue;
+            uint32_t frames = list[i].completeCount / fb;
+            if (frames == 0) {
+                atomic_fetch_add_explicit(&gStEmpty, 1, memory_order_relaxed);
+                continue;
+            }
+            appendCapture((const int32_t *)(base + list[i].offset), frames, m, 1, false);
         }
-        if (!ok) {
-            // A lost capture packet: put in silence with the nominal size.
-            appendCapture(NULL, nominalFrames(&gGapAcc, 1), m, 1);
-            continue;
-        }
-        if (frames == 0) {
-            atomic_fetch_add_explicit(&gStEmpty, 1, memory_order_relaxed);
-            continue;
-        }
-        appendCapture((const int32_t *)(base + list[i].offset), frames, m, 1);
+    }
+    reuseInSlot(slot);
+}
+
+// Direct read: queue the slot again only after the scanner read it. Normally the scanner is far ahead.
+static void reuseInSlot(int slot) {
+    if (gStop) return;
+    if (gDirectRead && atomic_load_explicit(&gStable, memory_order_acquire) &&
+        gInSlotReq[slot] >= atomic_load_explicit(&gScanDoneReq, memory_order_acquire) &&
+        gInSlotReq[slot] >= atomic_load_explicit(&gStableReq, memory_order_relaxed)) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500000), gQueue, ^{ reuseInSlot(slot); });
+        return;
     }
     enqueueIn(slot);
 }
@@ -340,7 +416,6 @@ static void onInDone(int slot, IOReturn status, IOUSBHostIsochronousTransaction 
 static void onOutDone(int slot, IOReturn status, IOUSBHostIsochronousTransaction *list) {
     gInFlightOut--;
     if (gStop || status == kIOReturnAborted) return;
-    promoteThread();
     recordLag(gOutSlotMicro[slot] + gTpr, &gOutLagMax, gOutLagHist);
     for (int i = 0; i < gTpr; i++)
         if (list[i].status != kIOReturnSuccess) atomic_fetch_add_explicit(&gStOutErr, 1, memory_order_relaxed);
@@ -361,8 +436,24 @@ static void retryLater(bool capture, int slot) {
     });
 }
 
+static void setInMapValid(InMap *m, bool valid) {
+    uint32_t q = atomic_load_explicit(&m->seq, memory_order_relaxed);
+    atomic_store_explicit(&m->seq, q + 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    m->valid = valid;
+    atomic_store_explicit(&m->seq, q + 2, memory_order_release);
+}
+
 static void enqueueIn(int slot) {
     IOUSBHostIsochronousTransaction *tx = gInTx[slot];
+    InMap *map = &gInMap[slot];
+    setInMapValid(map, false);
+    if (gDirectRead) {
+        // Mark all frame slots: the scanner counts the frames that the device wrote.
+        uint32_t *w = (uint32_t *)gInData[slot].mutableBytes;
+        const size_t words = (size_t)gTpr * gInFmt.maxPacket / 4;
+        for (size_t i = 0; i < words; i++) w[i] = SENTINEL;
+    }
     uint64_t frame = gNextInFrame;
     NSError *e = nil;
     BOOL ok = NO;
@@ -393,6 +484,15 @@ static void enqueueIn(int slot) {
     if (ok) {
         gNextInFrame = frame + gTpr / 8;
         gInFlightIn++;
+        gInSlotReq[slot] = gInReqIndex;
+        uint32_t q = atomic_load_explicit(&map->seq, memory_order_relaxed);
+        atomic_store_explicit(&map->seq, q + 1, memory_order_relaxed);
+        atomic_thread_fence(memory_order_release);
+        map->reqIndex = gInReqIndex++;
+        map->firstMicro = frame * 8;
+        map->base = gInData[slot].bytes;
+        map->valid = true;
+        atomic_store_explicit(&map->seq, q + 2, memory_order_release);
     } else {
         os_log_error(gLog, "capture enqueue failed (frame %llu): 0x%08lx; try again later", frame, (long)e.code);
         atomic_fetch_add_explicit(&gStInErr, 1, memory_order_relaxed);
@@ -435,7 +535,17 @@ static void fillOut(int slot) {
     }
 }
 
+static void setMapValid(OutMap *m, bool valid) {
+    uint32_t q = atomic_load_explicit(&m->seq, memory_order_relaxed);
+    atomic_store_explicit(&m->seq, q + 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    m->valid = valid;
+    atomic_store_explicit(&m->seq, q + 2, memory_order_release);
+}
+
 static void enqueueOut(int slot) {
+    OutMap *map = &gOutMap[slot];
+    setMapValid(map, false);
     uint64_t frame = gNextOutFrame;
     // State before the fill, to fill again after a resync.
     const int64_t pos0 = gOutPos;
@@ -474,6 +584,25 @@ static void enqueueOut(int slot) {
         gNextOutFrame = frame + gTpr / 8;
         gOutFillEndMicro = gNextOutFrame * 8;
         gInFlightOut++;
+        if (gOutMapped) {
+            // Publish the map, so the client can write into this request until shortly before the transfer.
+            const uint32_t fb = gOutFmt.channels * gOutFmt.subframe;
+            uint32_t q = atomic_load_explicit(&map->seq, memory_order_relaxed);
+            atomic_store_explicit(&map->seq, q + 1, memory_order_relaxed);
+            atomic_thread_fence(memory_order_release);
+            map->firstT = pos0 + gOutOffset;
+            map->firstMicro = frame * 8;
+            map->base = gOutData[slot].mutableBytes;
+            uint32_t total = 0;
+            for (int i = 0; i < gTpr; i++) {
+                map->cum[i] = (uint16_t)total;
+                total += gOutTx[slot][i].requestCount / fb;
+            }
+            map->cum[gTpr] = (uint16_t)total;
+            map->frames = total;
+            map->valid = true;
+            atomic_store_explicit(&map->seq, q + 2, memory_order_release);
+        }
     } else {
         os_log_error(gLog, "playback enqueue failed (frame %llu): 0x%08lx; try again later", frame, (long)e.code);
         atomic_fetch_add_explicit(&gStOutErr, 1, memory_order_relaxed);
@@ -483,6 +612,120 @@ static void enqueueOut(int slot) {
         gNominalAcc = acc0;
         retryLater(false, slot);
     }
+}
+
+// Scanner (direct read): a real-time thread that reads the capture data from the queued requests
+// 250 us after each microframe, writes it to the input ring, and publishes the zero timestamps.
+// So capture and the clock do not depend on the time of the USB callbacks.
+static bool findInRequest(uint64_t req, uint64_t *firstMicro, const uint8_t **base) {
+    for (int s = 0; s < gNumReq; s++) {
+        InMap *m = &gInMap[s];
+        uint32_t q = atomic_load_explicit(&m->seq, memory_order_acquire);
+        if (q & 1) continue;
+        bool valid = m->valid;
+        uint64_t idx = m->reqIndex, fm = m->firstMicro;
+        const uint8_t *b = m->base;
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&m->seq, memory_order_relaxed) != q) continue;
+        if (valid && idx == req) { *firstMicro = fm; *base = b; return true; }
+    }
+    return false;
+}
+
+static void *scanThread(void *arg) {
+    (void)arg;
+    pthread_setname_np("QuadCapture capture scanner");
+    const double ticksPerUs = 1000.0 / gNsPerTick;
+    thread_time_constraint_policy_data_t pol;
+    pol.period = (uint32_t)(SCAN_PERIOD_US * ticksPerUs);
+    pol.computation = (uint32_t)(150 * ticksPerUs);
+    pol.constraint = (uint32_t)(500 * ticksPerUs);
+    pol.preemptible = 1;
+    kern_return_t kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
+                                         THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    if (kr != KERN_SUCCESS) os_log_error(gLog, "scanner: real-time policy refused (%d)", kr);
+    const uint64_t period = (uint64_t)(SCAN_PERIOD_US * ticksPerUs);
+    uint64_t next = mach_absolute_time();
+    while (!atomic_load(&gScanStop) && !atomic_load_explicit(&gStable, memory_order_acquire)) {
+        next += period;
+        mach_wait_until(next);
+    }
+    if (atomic_load(&gScanStop)) return NULL;
+
+    uint64_t req = atomic_load(&gStableReq), expect = atomic_load(&gStableMicro);
+    gZeroHost0 = hostOfMicroShared(expect);
+    publishZero(0, gZeroHost0);
+    const uint32_t fb = gInFmt.channels * gInFmt.subframe;
+    const uint32_t slotFrames = gInFmt.maxPacket / fb;
+    const uint32_t wordsPerFrame = fb / 4;
+    uint64_t firstMicro = 0;
+    const uint8_t *base = NULL;
+    bool haveReq = false;
+    int j = 0;
+    uint32_t gapAcc = 0;
+    bool sampled = false;
+    next = mach_absolute_time();
+    while (!atomic_load(&gScanStop)) {
+        next += period;
+        uint64_t now = mach_absolute_time();
+        if (next < now) next = now + period;   // late (should not occur): do not run several times
+        mach_wait_until(next);
+        if (!sampled) {
+            thread_extended_info_data_t info;
+            mach_msg_type_number_t count = THREAD_EXTENDED_INFO_COUNT;
+            mach_port_t th = mach_thread_self();
+            if (thread_info(th, THREAD_EXTENDED_INFO, (thread_info_t)&info, &count) == KERN_SUCCESS)
+                atomic_store(&gScanPriority, info.pth_curpri);
+            mach_port_deallocate(mach_task_self(), th);
+            sampled = true;
+        }
+        uint64_t rm, rh;
+        loadRef(&rm, &rh);
+        const double nowMicro = (double)rm + ((double)mach_absolute_time() - (double)rh) / gTicksPerMicro;
+        for (;;) {
+            if (!haveReq) {
+                if (!findInRequest(req, &firstMicro, &base)) break;   // not queued yet
+                haveReq = true;
+                j = 0;
+                if (firstMicro > expect) {
+                    // Microframes skipped by a resync: put in silence, so sample time stays on the device clock.
+                    uint32_t gap = (uint32_t)(firstMicro - expect);
+                    uint32_t frames = nominalFrames(&gapAcc, gap);
+                    appendCapture(NULL, frames, expect, gap, true);
+                    atomic_fetch_add_explicit(&gStGap, frames, memory_order_relaxed);
+                }
+                expect = firstMicro;
+            }
+            const uint64_t m = firstMicro + (uint64_t)j;
+            if ((double)(m + 1 + SCAN_DELAY_MICROFRAMES) > nowMicro) break;   // not old enough yet
+            const uint32_t *pkt = (const uint32_t *)(base + (size_t)j * gInFmt.maxPacket);
+            uint32_t frames = 0;
+            while (frames < slotFrames) {
+                const uint32_t *w = pkt + (size_t)frames * wordsPerFrame;
+                bool marked = true;
+                for (uint32_t k = 0; k < wordsPerFrame; k++)
+                    if (w[k] != SENTINEL) { marked = false; break; }
+                if (marked) break;
+                frames++;
+            }
+            if (frames) appendCapture((const int32_t *)pkt, frames, m, 1, true);
+            else atomic_fetch_add_explicit(&gStEmpty, 1, memory_order_relaxed);
+            expect = m + 1;
+            if (++j == gTpr) {
+                atomic_store_explicit(&gScanDoneReq, req + 1, memory_order_release);
+                req++;
+                haveReq = false;
+            }
+        }
+    }
+    return NULL;
+}
+
+static void stopScanner(void) {
+    if (!gScanThreadRunning) return;
+    atomic_store(&gScanStop, true);
+    pthread_join(gScanThread, NULL);
+    gScanThreadRunning = false;
 }
 
 // Interest handler of the interfaces: the device disconnected (or the system reset it).
@@ -495,6 +738,7 @@ static IOUSBHostInterestHandler gInterest = ^(IOUSBHostObject *object, uint32_t 
 };
 
 static void closeAll(void) {
+    stopScanner();
     if (gIfIn) { [gIfIn selectAlternateSetting:0 error:nil]; [gIfIn destroy]; }
     if (gIfOut) { [gIfOut selectAlternateSetting:0 error:nil]; [gIfOut destroy]; }
     if (gDev) [gDev destroy];
@@ -528,6 +772,7 @@ static void drain(void) {
         [gInPipe abortWithOption:IOUSBHostAbortOptionSynchronous error:nil];
         [gOutPipe abortWithOption:IOUSBHostAbortOptionSynchronous error:nil];
     }
+    stopScanner();
 }
 
 void qc_engine_configure(int requests, int microframes, uint32_t outputMarginFrames, uint32_t inputMarginFrames) {
@@ -542,28 +787,36 @@ void qc_engine_configure(int requests, int microframes, uint32_t outputMarginFra
     pthread_mutex_unlock(&gLock);
 }
 
-void qc_engine_set_scheduling(int mode) {
+void qc_engine_set_direct(int mask) {
     pthread_mutex_lock(&gLock);
-    if (!atomic_load(&gRunning) && mode >= 0 && mode <= 2) gSchedMode = mode;
+    if (!atomic_load(&gRunning)) {
+        gDirectWrite = (mask & QC_DIRECT_WRITE) != 0;
+        gDirectRead = (mask & QC_DIRECT_READ) != 0;
+    }
     pthread_mutex_unlock(&gLock);
 }
 
 void qc_engine_get_config(int *requests, int *microframes, uint32_t *outputMarginFrames, uint32_t *inputMarginFrames,
-                          int *schedulingMode) {
+                          int *direct) {
     pthread_mutex_lock(&gLock);
     *requests = gNumReq;
     *microframes = gTpr;
     *outputMarginFrames = gOutMargin;
     *inputMarginFrames = gInMargin;
-    *schedulingMode = gSchedMode;
+    *direct = (gDirectWrite ? QC_DIRECT_WRITE : 0) | (gDirectRead ? QC_DIRECT_READ : 0);
     pthread_mutex_unlock(&gLock);
 }
 
 uint32_t qc_engine_output_lead_frames(void) {
+    if (gDirectWrite) return (uint32_t)ceil(GUARD_MICROFRAMES * QC_SAMPLE_RATE / 8000.0) + gOutMargin;
     return (uint32_t)ceil(gNumReq * gTpr * QC_SAMPLE_RATE / 8000.0) + gOutMargin;
 }
 
 uint32_t qc_engine_input_delay_frames(void) {
+    if (gDirectRead) {
+        const double micros = SCAN_DELAY_MICROFRAMES + 1 + SCAN_PERIOD_US / 125.0;
+        return (uint32_t)ceil(micros * QC_SAMPLE_RATE / 8000.0) + gInMargin;
+    }
     return (uint32_t)ceil(gTpr * QC_SAMPLE_RATE / 8000.0) + gInMargin;
 }
 
@@ -581,21 +834,10 @@ int qc_engine_start(void) {
         pthread_mutex_lock(&gLock);
         if (!gLog) gLog = os_log_create("com.louistissot.quadcapture", "engine");
         if (atomic_load(&gRunning)) { pthread_mutex_unlock(&gLock); return 0; }
-        if (!gQueue || gQueueMode != (gSchedMode > 0)) {
-            if (gSchedMode > 0) {
-                // A workloop in an audio workgroup: its thread uses the scheduling of the workgroup.
-                dispatch_workloop_t wl = dispatch_workloop_create_inactive("com.louistissot.quadcapture.usb");
-                if (!gWorkgroup) gWorkgroup = AudioWorkIntervalCreate("QuadCapture USB", OS_CLOCK_MACH_ABSOLUTE_TIME, NULL);
-                if (gWorkgroup) dispatch_workloop_set_os_workgroup(wl, gWorkgroup);
-                dispatch_activate(wl);
-                gQueue = wl;
-            } else {
-                gQueue = dispatch_queue_create("com.louistissot.quadcapture.usb",
-                                               dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
-                                                                                       QOS_CLASS_USER_INTERACTIVE, 0));
-            }
-            gQueueMode = gSchedMode > 0;
-        }
+        if (!gQueue)
+            gQueue = dispatch_queue_create("com.louistissot.quadcapture.usb",
+                                           dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+                                                                                   QOS_CLASS_USER_INTERACTIVE, 0));
         mach_timebase_info_data_t tb;
         mach_timebase_info(&tb);
         gNsPerTick = (double)tb.numer / tb.denom;
@@ -664,6 +906,19 @@ int qc_engine_start(void) {
         atomic_store(&gStInputMissing, 0); atomic_store(&gStOutputLate, 0); atomic_store(&gStEmpty, 0);
         atomic_store(&gStInErr, 0); atomic_store(&gStOutErr, 0); atomic_store(&gStZero, 0);
         atomic_store(&gStResync, 0); atomic_store(&gStGap, 0);
+        atomic_store(&gStDirect, 0); atomic_store(&gStRing, 0); atomic_store(&gStRace, 0);
+        atomic_store(&gScanDoneReq, 0);
+        atomic_store(&gStableReq, 0);
+        atomic_store(&gScanPriority, 0);
+        if (gDirectRead) {
+            atomic_store(&gScanStop, false);
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            pthread_attr_setstacksize(&attr, 256 * 1024);
+            if (pthread_create(&gScanThread, &attr, scanThread, NULL) == 0) gScanThreadRunning = true;
+            pthread_attr_destroy(&attr);
+            if (!gScanThreadRunning) { os_log_error(gLog, "cannot create the scanner thread"); rc = -9; goto fail; }
+        }
         runOnQueue(^{
             gStop = false;
             gInFlightIn = gInFlightOut = 0;
@@ -674,6 +929,11 @@ int qc_engine_start(void) {
             gOutOffset = 0;
             gOutMapped = false;
             gInLagMax = gOutLagMax = 0;
+            for (int i = 0; i < QC_MAX_REQUESTS; i++) {
+                setMapValid(&gOutMap[i], false);
+                setInMapValid(&gInMap[i], false);
+            }
+            gInReqIndex = 0;
             memset(gInLagHist, 0, sizeof(gInLagHist));
             memset(gOutLagHist, 0, sizeof(gOutLagHist));
             gFrameEstValid = false;
@@ -688,15 +948,22 @@ int qc_engine_start(void) {
         atomic_store(&gRunning, true);
 
         for (int i = 0; i < 300 && !atomic_load(&gStable); i++) usleep(10000);
+        // Wait until all queued playback requests were queued after the start of sample time, so
+        // each has a map for direct writes (the queue depth, at most 300 ms).
+        if (atomic_load(&gStable)) {
+            const useconds_t depthUs = (useconds_t)gNumReq * (useconds_t)gTpr * 125;
+            usleep(depthUs + 2000);
+        }
         if (!atomic_load(&gStable)) {
             os_log_error(gLog, "capture data did not become stable in 3 s");
             drain();
             atomic_store(&gRunning, false);
             rc = -8; goto fail;
         }
-        os_log(gLog, "engine started: %d requests x %d microframes; output lead %u, input delay %u frames; %{public}s clock",
+        os_log(gLog, "engine started: %d requests x %d microframes; output lead %u, input delay %u frames; %{public}s clock; "
+                     "direct write %{public}s, direct read %{public}s",
                gNumReq, gTpr, qc_engine_output_lead_frames(), qc_engine_input_delay_frames(),
-               gHasMicroAPI ? "microframe" : "frame (smoothed)");
+               gHasMicroAPI ? "microframe" : "frame (smoothed)", gDirectWrite ? "on" : "off", gDirectRead ? "on" : "off");
         pthread_mutex_unlock(&gLock);
         return 0;
 
@@ -757,18 +1024,83 @@ void qc_engine_read_input(int64_t sampleTime, uint32_t frames, float *dst) {
     if (missing) atomic_fetch_add_explicit(&gStInputMissing, missing, memory_order_relaxed);
 }
 
+static void writeRing(int64_t pos, const float *s) {
+    float *d = &gOutRing[(pos & RING_MASK) * QC_OUT_CHANNELS];
+    for (int c = 0; c < QC_OUT_CHANNELS; c++) d[c] = s[c];
+}
+
 void qc_engine_write_output(int64_t sampleTime, uint32_t frames, const float *src) {
-    int64_t r = atomic_load_explicit(&gOutReadPos, memory_order_acquire);
-    uint64_t late = 0;
-    for (uint32_t i = 0; i < frames; i++) {
-        int64_t pos = sampleTime + i;
-        if (pos < r || pos < 0) { late++; continue; }
-        if (r != INT64_MAX && pos >= r + QC_RING_FRAMES) continue;
-        float *d = &gOutRing[(pos & RING_MASK) * QC_OUT_CHANNELS];
-        const float *s = src + (size_t)i * QC_OUT_CHANNELS;
-        for (int c = 0; c < QC_OUT_CHANNELS; c++) d[c] = s[c];
+    const int64_t r = atomic_load_explicit(&gOutReadPos, memory_order_acquire);
+    uint64_t late = 0, direct = 0, ring = 0, race = 0;
+    if (!gDirectWrite || !atomic_load_explicit(&gStable, memory_order_acquire)) {
+        for (uint32_t i = 0; i < frames; i++) {
+            int64_t pos = sampleTime + i;
+            if (pos < r || pos < 0) { late++; continue; }
+            if (r != INT64_MAX && pos >= r + QC_RING_FRAMES) continue;
+            writeRing(pos, src + (size_t)i * QC_OUT_CHANNELS);
+        }
+        if (late) atomic_fetch_add_explicit(&gStOutputLate, late, memory_order_relaxed);
+        return;
+    }
+
+    // Current microframe, from the clock reference of the USB queue.
+    uint64_t refMicro, refHost;
+    for (;;) {
+        uint32_t a = atomic_load_explicit(&gRefSeq, memory_order_acquire);
+        if (a & 1) continue;
+        refMicro = atomic_load_explicit(&gRefMicroA, memory_order_relaxed);
+        refHost = atomic_load_explicit(&gRefHostA, memory_order_relaxed);
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&gRefSeq, memory_order_relaxed) == a) break;
+    }
+    const double nowMicro = (double)refMicro + ((double)mach_absolute_time() - (double)refHost) / gTicksPerMicro;
+    const double limitMicro = nowMicro + GUARD_MICROFRAMES;
+    const uint32_t ch = (uint32_t)gOutFmt.channels;
+
+    // Work in chunks, with a flag for each frame that a queued request received.
+    uint32_t done = 0;
+    while (done < frames) {
+        enum { CHUNK = 512 };
+        const uint32_t n = frames - done < CHUNK ? frames - done : CHUNK;
+        const int64_t t0 = sampleTime + done;
+        bool covered[CHUNK];
+        memset(covered, 0, n);
+        for (int s = 0; s < gNumReq; s++) {
+            OutMap *m = &gOutMap[s];
+            uint32_t q1 = atomic_load_explicit(&m->seq, memory_order_acquire);
+            if ((q1 & 1) || !m->valid) continue;
+            const int64_t a = t0 > m->firstT ? t0 : m->firstT;
+            const int64_t endT = m->firstT + (int64_t)m->frames;
+            const int64_t b = (t0 + n) < endT ? (t0 + n) : endT;
+            if (a >= b) continue;
+            int tx = 0;
+            for (int64_t t = a; t < b; t++) {
+                const uint32_t rel = (uint32_t)(t - m->firstT);
+                while (tx < gTpr - 1 && m->cum[tx + 1] <= rel) tx++;
+                covered[t - t0] = true;
+                if ((double)(m->firstMicro + (uint64_t)tx) < limitMicro) { late++; continue; }
+                int32_t *o = (int32_t *)(m->base + (size_t)rel * ch * 4);
+                const float *v = src + (size_t)(t - sampleTime) * QC_OUT_CHANNELS;
+                for (int c = 0; c < QC_OUT_CHANNELS; c++) o[c] = floatToSample(v[c]);
+                direct++;
+            }
+            atomic_thread_fence(memory_order_seq_cst);
+            if (atomic_load_explicit(&m->seq, memory_order_relaxed) != q1) race++;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            if (covered[i]) continue;
+            const int64_t pos = t0 + i;
+            if (pos < r || pos < 0) { late++; continue; }   // already sent
+            if (pos >= r + QC_RING_FRAMES) continue;
+            writeRing(pos, src + (size_t)(pos - sampleTime) * QC_OUT_CHANNELS);   // a later request reads it
+            ring++;
+        }
+        done += n;
     }
     if (late) atomic_fetch_add_explicit(&gStOutputLate, late, memory_order_relaxed);
+    if (direct) atomic_fetch_add_explicit(&gStDirect, direct, memory_order_relaxed);
+    if (ring) atomic_fetch_add_explicit(&gStRing, ring, memory_order_relaxed);
+    if (race) atomic_fetch_add_explicit(&gStRace, race, memory_order_relaxed);
 }
 
 void qc_engine_get_stats(QCEngineStats *st) {
@@ -787,6 +1119,10 @@ void qc_engine_get_stats(QCEngineStats *st) {
     st->outLagMaxMs = gOutLagMax;
     memcpy(st->inLagHist, gInLagHist, sizeof(gInLagHist));
     memcpy(st->outLagHist, gOutLagHist, sizeof(gOutLagHist));
+    st->directFrames = atomic_load(&gStDirect);
+    st->ringFrames = atomic_load(&gStRing);
+    st->races = atomic_load(&gStRace);
+    st->scannerPriority = atomic_load(&gScanPriority);
     st->callbackPriority = atomic_load(&gCbPriority);
     st->callbackPolicy = atomic_load(&gCbPolicy);
     double s;

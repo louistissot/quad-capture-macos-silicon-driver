@@ -38,11 +38,12 @@ enum {
 
 // Custom properties (data type: CFPropertyList, a CFDictionary).
 //   'qcfg' (settable): USB queue configuration, applied with a device configuration change and kept
-//          in the host storage. Keys: requests, microframes, outputMargin, inputMargin, scheduling.
+//          in the host storage. Keys: requests, microframes, outputMargin, inputMargin, direct
+//          (1 = direct write, 2 = direct read, 3 = both).
 //   'qsta' (read only): engine statistics.
 #define kQCPropertyConfig 'qcfg'
 #define kQCPropertyStats 'qsta'
-#define kQCStorageKey CFSTR("QuadCaptureConfig")
+#define kQCStorageKey CFSTR("QuadCaptureConfig.v4")   // a new name discards the values of older versions
 #define kQCVolumeStorageKey CFSTR("QuadCaptureVolume")
 
 static os_log_t gLog;
@@ -101,31 +102,31 @@ static CFMutableDictionaryRef newDict(void) {
 }
 
 static CFDictionaryRef copyConfigDictionary(void) {
-    int req, tpr, sched;
+    int req, tpr, direct;
     uint32_t outM, inM;
-    qc_engine_get_config(&req, &tpr, &outM, &inM, &sched);
+    qc_engine_get_config(&req, &tpr, &outM, &inM, &direct);
     CFMutableDictionaryRef d = newDict();
     dictSet(d, CFSTR("requests"), req);
     dictSet(d, CFSTR("microframes"), tpr);
     dictSet(d, CFSTR("outputMargin"), outM);
     dictSet(d, CFSTR("inputMargin"), inM);
-    dictSet(d, CFSTR("scheduling"), sched);
+    dictSet(d, CFSTR("direct"), direct);
     dictSet(d, CFSTR("outputLeadFrames"), qc_engine_output_lead_frames());
     dictSet(d, CFSTR("inputDelayFrames"), qc_engine_input_delay_frames());
     return d;
 }
 
 static void applyConfigDictionary(CFDictionaryRef d) {
-    int req, tpr, sched;
+    int req, tpr, direct;
     uint32_t outM, inM;
-    qc_engine_get_config(&req, &tpr, &outM, &inM, &sched);
-    qc_engine_set_scheduling(dictInt(d, CFSTR("scheduling"), sched));
+    qc_engine_get_config(&req, &tpr, &outM, &inM, &direct);
+    qc_engine_set_direct(dictInt(d, CFSTR("direct"), direct));
     qc_engine_configure(dictInt(d, CFSTR("requests"), req), dictInt(d, CFSTR("microframes"), tpr),
                         (uint32_t)dictInt(d, CFSTR("outputMargin"), (int)outM),
                         (uint32_t)dictInt(d, CFSTR("inputMargin"), (int)inM));
-    qc_engine_get_config(&req, &tpr, &outM, &inM, &sched);
-    os_log(gLog, "configuration: %d requests x %d microframes, margins %u/%u, scheduling %d; output lead %u, input delay %u",
-           req, tpr, outM, inM, sched, qc_engine_output_lead_frames(), qc_engine_input_delay_frames());
+    qc_engine_get_config(&req, &tpr, &outM, &inM, &direct);
+    os_log(gLog, "configuration: %d requests x %d microframes, margins %u/%u, direct %d; output lead %u, input delay %u",
+           req, tpr, outM, inM, direct, qc_engine_output_lead_frames(), qc_engine_input_delay_frames());
 }
 
 static CFDictionaryRef copyStatsDictionary(void) {
@@ -147,6 +148,10 @@ static CFDictionaryRef copyStatsDictionary(void) {
     dictSet(d, CFSTR("outLagMaxMs"), st.outLagMaxMs);
     dictSetArray(d, CFSTR("inLagHist"), st.inLagHist, QC_LAG_BUCKETS);
     dictSetArray(d, CFSTR("outLagHist"), st.outLagHist, QC_LAG_BUCKETS);
+    dictSet(d, CFSTR("directFrames"), st.directFrames);
+    dictSet(d, CFSTR("ringFrames"), st.ringFrames);
+    dictSet(d, CFSTR("races"), st.races);
+    dictSet(d, CFSTR("scannerPriority"), st.scannerPriority);
     dictSet(d, CFSTR("callbackPriority"), st.callbackPriority);
     dictSet(d, CFSTR("callbackPolicy"), st.callbackPolicy);
     return d;
@@ -924,10 +929,10 @@ static OSStatus QC_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inD
         qc_engine_stop();
         os_log(gLog, "StopIO: input frames %llu, missing %llu, output late %llu, empty packets %llu, "
                      "USB errors %llu/%llu, resyncs %llu, gap frames %llu, lag max %.2f/%.2f ms, "
-                     "callback priority %d policy %d, rate %.2f Hz",
+                     "direct %llu, ring %llu, races %llu, callback priority %d, scanner priority %d",
                st.inputFrames, st.inputMissing, st.outputLate, st.emptyPackets, st.inErrors, st.outErrors,
-               st.resyncs, st.gapFrames, st.inLagMaxMs, st.outLagMaxMs, st.callbackPriority, st.callbackPolicy,
-               st.measuredRate);
+               st.resyncs, st.gapFrames, st.inLagMaxMs, st.outLagMaxMs, st.directFrames, st.ringFrames, st.races,
+               st.callbackPriority, st.scannerPriority);
     }
     pthread_mutex_unlock(&gStateLock);
     return 0;

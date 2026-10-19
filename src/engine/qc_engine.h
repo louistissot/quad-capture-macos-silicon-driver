@@ -40,13 +40,22 @@ typedef struct {
     double measuredRate;         // device sample rate measured against the host clock
     double inLagMaxMs, outLagMaxMs;   // completion callback lag after the end of the request
     uint64_t inLagHist[QC_LAG_BUCKETS], outLagHist[QC_LAG_BUCKETS];
+    uint64_t directFrames;       // output frames written directly into queued USB requests
+    uint64_t ringFrames;         // output frames written to the ring (read when a request is queued)
+    uint64_t races;              // direct writes into a request that changed during the write
     int callbackPriority, callbackPolicy;   // scheduling of the USB callback thread (sampled)
+    int scannerPriority;                    // priority of the real-time capture scanner (97 = real time)
 } QCEngineStats;
 
-// Scheduling of the USB callbacks: 0 = serial queue (user-interactive QoS), 1 = workloop in an
-// audio workgroup, 2 = mode 1 and a real-time (time-constraint) policy on the callback thread.
+// Direct write (default on): qc_engine_write_output writes into the queued USB requests until
+// 1 ms before the transfer. Off: playback data comes from the ring when a request is queued.
+// Direct read (default on): a real-time thread reads the capture data from the queued requests
+// 250 us after each microframe and publishes the clock. Off: the USB callbacks do it.
+// With both on, the latency does not depend on the queue depth or on the time of the callbacks.
 // Call before qc_engine_start.
-void qc_engine_set_scheduling(int mode);
+#define QC_DIRECT_WRITE 1
+#define QC_DIRECT_READ 2
+void qc_engine_set_direct(int mask);
 
 // Queue size: requests in flight for each direction, and microframes (125 us) per request
 // (a multiple of 8). The margins (frames) cover the callback lag. Call before qc_engine_start.
@@ -55,7 +64,7 @@ void qc_engine_configure(int requests, int microframes, uint32_t outputMarginFra
 // A client must write the output this number of frames before the current sample time, and can
 // read the input this number of frames after it. These values follow the configuration.
 void qc_engine_get_config(int *requests, int *microframes, uint32_t *outputMarginFrames, uint32_t *inputMarginFrames,
-                          int *schedulingMode);
+                          int *direct);
 
 uint32_t qc_engine_output_lead_frames(void);
 uint32_t qc_engine_input_delay_frames(void);

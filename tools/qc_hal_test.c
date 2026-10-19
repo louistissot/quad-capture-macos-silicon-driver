@@ -2,7 +2,9 @@
 // It records INPUT 1-2 and, with -T, plays the test tone: 440 Hz left (0.3-2.3 s), then 660 Hz right
 // (2.7-4.7 s), -30 dBFS. It reports IO cycles, sample time continuity, and input levels.
 //
-// Usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-c requests,microframes,outMargin,inMargin,scheduling] [-q]
+// Usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-b buffer_frames]
+//                    [-c requests,microframes,outMargin,inMargin,direct] [-q]
+//   -b sets the IO buffer size of this client (frames), as an app does (for example 128).
 //   -c sets the USB queue of the plug-in (custom property 'qcfg'); -q prints the plug-in configuration
 //   and statistics (custom property 'qsta') and stops.
 #include <CoreAudio/CoreAudio.h>
@@ -68,10 +70,10 @@ static void printProperty(AudioObjectID dev, AudioObjectPropertySelector sel, co
 static int setConfig(AudioObjectID dev, const char *spec) {
     int v[5];
     if (sscanf(spec, "%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4]) != 5) {
-        fprintf(stderr, "-c needs 5 numbers: requests,microframes,outMargin,inMargin,scheduling\n");
+        fprintf(stderr, "-c needs 5 numbers: requests,microframes,outMargin,inMargin,direct\n");
         return -1;
     }
-    static const char *names[5] = {"requests", "microframes", "outputMargin", "inputMargin", "scheduling"};
+    static const char *names[5] = {"requests", "microframes", "outputMargin", "inputMargin", "direct"};
     CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
                                                          &kCFTypeDictionaryValueCallBacks);
     for (int i = 0; i < 5; i++) {
@@ -179,14 +181,16 @@ int main(int argc, char **argv) {
     int tone = 0;
     const char *outPath = "recordings/hal-test-in1-2.wav";
     int opt, queryOnly = 0;
+    UInt32 bufferFrames = 0;
     const char *config = NULL;
-    while ((opt = getopt(argc, argv, "s:To:c:q")) != -1) {
+    while ((opt = getopt(argc, argv, "s:To:c:qb:")) != -1) {
+        if (opt == 'b') { bufferFrames = (UInt32)atoi(optarg); continue; }
         if (opt == 's') seconds = atof(optarg);
         else if (opt == 'T') tone = 1;
         else if (opt == 'o') outPath = optarg;
         else if (opt == 'c') config = optarg;
         else if (opt == 'q') queryOnly = 1;
-        else { fprintf(stderr, "usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-c r,m,out,in,sched] [-q]\n"); return 2; }
+        else { fprintf(stderr, "usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-b frames] [-c r,m,out,in,direct] [-q]\n"); return 2; }
     }
     if (tone && seconds < 5.0) seconds = 5.0;
 
@@ -205,6 +209,12 @@ int main(int argc, char **argv) {
         printProperty(dev, kQCPropertyConfig, "Configuration");
         printProperty(dev, kQCPropertyStats, "Statistics");
         return 0;
+    }
+    if (bufferFrames) {
+        AudioObjectPropertyAddress b = {kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal,
+                                        kAudioObjectPropertyElementMain};
+        OSStatus br = AudioObjectSetPropertyData(dev, &b, 0, NULL, sizeof(bufferFrames), &bufferFrames);
+        if (br) fprintf(stderr, "setting the buffer size failed: %d\n", (int)br);
     }
     printf("Device %u: buffer %u frames; safety offset in/out %u/%u; latency in/out %u/%u\n", dev,
            getU32(dev, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal),
