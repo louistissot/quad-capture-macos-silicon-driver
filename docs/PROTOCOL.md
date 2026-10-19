@@ -224,6 +224,43 @@ follow the size of a capture packet. The capture stream needs the playback strea
 sends capture data only while playback packets arrive. The engine sends silence when no client
 plays audio.
 
+## Host duties (audit of the Roland driver)
+
+On 19 October 2026 the Roland kext (1.5.6) and control panel app were studied again, to find each
+duty that the Roland driver does for the device. A missing duty can make the firmware stop (as
+the full control-channel queue did). This table lists each duty and what this project does.
+
+| Duty of the Roland driver | This project |
+|---|---|
+| Keep 2 reads pending on the control channel (interface 2, bulk IN `0x86`) from device start, with or without a MIDI client. After an error: clear the stall and read again after 1.5 s. | The audio plug-in reads it (`qc_ctl.m`) when no other process uses it, and opens it again within 2 s after an error. The MIDI driver reads it while a MIDI app runs. |
+| Read the clock status (interface 3, alternate setting 1, interrupt IN `0x82`) each second, for the life of the device. After a stall: clear it. | The audio plug-in reads it each second (`qc_ctl.m`) and clears a stall. A tool that wants interface 3 posts `com.louistissot.quadcapture.interface3.want`. |
+| When the status rate or the clock source changes (signal at COAXIAL IN with DIGITAL IN = AUTO), restart the streams at the status rate. Refuse other rates while the clock is external. | The plug-in follows the device rate after 2 s of stable status, offers only that rate, and refuses other rates while the clock is external. Not tested with a coaxial source yet. |
+| Set the rate (vendor request) only while the streams are stopped, and only if the device rate is different. | Yes (since the sample-rate commit). |
+| Start: capture interface first, then playback, each through alternate setting 0; both directions on the same future frame. | Yes (capture-first order since this audit). |
+| Stop: both directions together, wait for all transfers, then alternate setting 0 on capture and playback. | Yes (clean drain instead of an abort). |
+| Playback packet size = capture size of the same time (implicit feedback); never a 0-byte packet. | Yes. |
+| After an isochronous error: continue on the frame clock with silence, and resume the streams. | A late request moves to a later frame (resync). A full restart after errors is not done. |
+| Sleep: abort the control-channel reads; send DT1 `00 0a 00 00` = 0 (panel level meter off) when the panel used it. Wake: restart the reads, send RQ1 for the state block. | The reads end with an error at sleep, and the reader opens the interface again within 2 s. The level meter is not used. |
+| Interface 4 (interrupt IN `0x81`). | Not used by the Roland driver; not used here. |
+| No vendor request and no SysEx at device start. | Same. |
+
+### Clock status (interface 3)
+
+The device answers each read at once. It sends two 8-byte messages in turn:
+
+| Byte | Content |
+|---|---|
+| 0 | Message type: 0 or 1. Only type 1 is used by the Roland driver. |
+| 2 | Not known (the Roland driver stores it and does not use it). |
+| 3-5 | Device rate in Hz, 24-bit little-endian (also when the clock is external). |
+| 6 | 1 = the clock comes from COAXIAL IN ("EXTERNAL" in the Roland panel). |
+| 7 | Probably 1 = clock locked (the Roland panel blinks "EXTERNAL" when it is 0). |
+
+Example (internal clock, 44.1 kHz): `01 00 00 44 AC 00 00 01`.
+
+An interrupt endpoint accepts no completion timeout in IOUSBHost (a timeout gives
+`kIOReturnBadArgument`, 0xe00002c2): read with timeout 0, and abort the read if necessary.
+
 ## Device behavior found in tests
 
 These results come from tests on a MacBook Pro M4 Pro with macOS 26.6 (19 October 2026).
@@ -247,7 +284,7 @@ These results come from tests on a MacBook Pro M4 Pro with macOS 26.6 (19 Octobe
   with the alternate setting.
 - **Rate change.** The device needs about 1 s (5 polls of 200 ms) to change its clock. The
   first status read after the "set" request can still show the old rate (seen at 48 to 96 kHz).
-  The interrupt endpoint `0x82` sent no status message while the device was idle.
+  An earlier test read no status from `0x82`; the cause was the read timeout (see "Clock status").
 - **192 kHz noise.** The input noise floor at 192 kHz is about -81 dBFS RMS (about -95 to
   -100 dBFS at the other rates), probably because of the wider bandwidth.
 
@@ -256,10 +293,21 @@ These results come from tests on a MacBook Pro M4 Pro with macOS 26.6 (19 Octobe
 ### Streams
 
 - `NUM_REQ` isochronous requests are in flight for each direction. Each request has `TPR`
-  microframes (`qc_engine_configure`). The default is 16 requests of 16 microframes (32 ms).
+  microframes (`qc_engine_configure`). The default is 8 requests of 128 microframes (16 ms each,
+  128 ms in total). With direct read and direct write, the request length does not change the
+  latency, but each request costs kernel calls. Measured CPU of the driver process (Core Audio,
+  44.1 kHz, 128-frame buffer, 30 s): 32 x 4 ms = 9.4 % of one core, 16 x 8 ms = 6.7 %,
+  8 x 16 ms = 4.5 %.
+- Safety margins: 44 frames (1 ms at 44.1 kHz, scaled for other rates) for input and output. The
+  safety offsets are then 105 frames (2.4 ms) for input and 89 frames (2.0 ms) for output at
+  44.1 kHz. A test with all 12 CPU cores at 100 % and a 64-frame buffer (30 s) gave 0 late and
+  0 missing frames with margins of 88, 44 and 22 frames.
 - Requests use explicit frame numbers. Capture and playback start in the same frame.
-- The data of a playback request comes from the output ring when the request is queued. Thus the
-  output safety offset is the queue depth plus a margin for late callbacks.
+- Direct write (default): the Core Audio IO thread writes the playback samples directly into the
+  queued requests, until 1 ms before the transfer. Direct read (default): a real-time thread reads
+  the capture data from the queued requests 250 us after each microframe. Thus the latency does not
+  depend on the queue depth. Without direct write, the data of a playback request comes from the
+  output ring when the request is queued, and the output safety offset is the queue depth.
 - A request that is too late (`kIOReturnIsoTooOld`) moves to a later frame (2, 4, 8 or 16 ms after
   now). Capture puts in silence for the skipped microframes, and playback skips the same number of
   samples, so both stay on the device clock. If all attempts fail, the engine tries again 1 ms

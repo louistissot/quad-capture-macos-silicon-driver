@@ -2,4 +2,5 @@
 # Remove an earlier version, so that no old file stays in the plug-in bundles.
 rm -rf "/Library/Audio/Plug-Ins/HAL/QuadCapture.driver"
 rm -rf "/Library/Audio/MIDI Drivers/QuadCaptureMIDI.plugin"
+rm -rf "/Applications/QuadCapture Panel.app"
 exit 0

@@ -7,7 +7,9 @@
 //   -r sets the sample rate: 44100 (default), 48000, 96000 or 192000 Hz.
 //   -T plays the test tone: 440 Hz left (0.3-2.3 s), then 660 Hz right (2.7-4.7 s), -30 dBFS.
 #import <Foundation/Foundation.h>
+#include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach/thread_policy.h>
 #include <math.h>
 #include <getopt.h>
 #include "engine/qc_engine.h"
@@ -56,7 +58,7 @@ int main(int argc, char **argv) {
             else { fprintf(stderr, "usage: qc_engine_test [-s seconds] [-T] [-o dir] [-n requests] [-t microframes] [-m out_margin] [-i in_margin] [-r rate]\n"); return 2; }
         }
         if (nReq || tpr || outMargin >= 0 || inMargin >= 0)
-            qc_engine_configure(nReq ? nReq : 32, tpr ? tpr : 32, outMargin >= 0 ? outMargin : 88, inMargin >= 0 ? inMargin : 88);
+            qc_engine_configure(nReq ? nReq : 8, tpr ? tpr : 128, outMargin >= 0 ? outMargin : 44, inMargin >= 0 ? inMargin : 44);
         const double rate = qc_engine_get_rate();
         const int64_t lead = qc_engine_output_lead_frames(), delay = qc_engine_input_delay_frames();
         printf("%.0f Hz. Output lead %lld frames (%.1f ms), input delay %lld frames (%.1f ms)\n", rate, lead,
@@ -68,6 +70,18 @@ int main(int argc, char **argv) {
         const double ticksPerFrame = 1e9 / rate * tb.denom / tb.numer;
 
         uint64_t t0 = mach_absolute_time();
+        // The loop below runs in real time, as the Core Audio IO thread does (2 ms period).
+        {
+            thread_time_constraint_policy_data_t pol;
+            const double ticksPerUs = 1000.0 * tb.denom / tb.numer;
+            pol.period = (uint32_t)(2000 * ticksPerUs);
+            pol.computation = (uint32_t)(300 * ticksPerUs);
+            pol.constraint = (uint32_t)(1000 * ticksPerUs);
+            pol.preemptible = 1;
+            if (thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
+                                  THREAD_TIME_CONSTRAINT_POLICY_COUNT) != KERN_SUCCESS)
+                fprintf(stderr, "real-time policy refused\n");
+        }
         int rc = qc_engine_start();
         double startMs = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6;
         if (rc) { fprintf(stderr, "qc_engine_start failed: %d (see: log show --last 1m --predicate 'subsystem == \"com.louistissot.quadcapture\"')\n", rc); return 1; }

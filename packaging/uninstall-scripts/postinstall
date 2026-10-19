@@ -1,7 +1,8 @@
 #!/bin/sh
-# Remove the QUAD-CAPTURE drivers and restart the Core Audio and MIDI services.
+# Remove the QUAD-CAPTURE drivers and the panel app, and restart the Core Audio and MIDI services.
 rm -rf "/Library/Audio/Plug-Ins/HAL/QuadCapture.driver"
 rm -rf "/Library/Audio/MIDI Drivers/QuadCaptureMIDI.plugin"
+rm -rf "/Applications/QuadCapture Panel.app"
 /usr/sbin/pkgutil --forget com.louistissot.quadcapture.driver >/dev/null 2>&1
 /usr/bin/killall coreaudiod 2>/dev/null
 /usr/bin/killall MIDIServer 2>/dev/null

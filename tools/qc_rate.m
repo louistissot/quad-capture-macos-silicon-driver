@@ -19,6 +19,8 @@
 #import <IOUSBHost/IOUSBHost.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <notify.h>
+#include "engine/qc_ctl.h"
 
 #define QC_VID 0x0582
 #define QC_PID 0x012f
@@ -79,9 +81,13 @@ static void readStatusMessages(void) {
                                                interfaceProtocol:nil speed:nil productIDArray:nil];
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, m);
     if (!svc) { printf("Interface 3 not found (is the configuration set?).\n"); return; }
+    // The audio driver reads interface 3 each second: ask it to release the interface (qc_ctl.h).
+    notify_post(QC_CTL_STATUS_WANT_NOTIFICATION);
+    usleep(300000);
     NSError *err = nil;
     IOUSBHostInterface *ifc = [[IOUSBHostInterface alloc] initWithIOService:svc options:IOUSBHostObjectInitOptionsNone
-                                                                      queue:nil error:&err interestHandler:nil];
+                                                                      queue:dispatch_queue_create("qc_rate", NULL)
+                                                                      error:&err interestHandler:nil];
     IOObjectRelease(svc);
     if (!ifc) { printf("Cannot open interface 3: %s\n", err.localizedDescription.UTF8String); return; }
     // Alternate setting 0 has no endpoint. Endpoint 0x82 is in alternate setting 1.
@@ -94,11 +100,27 @@ static void readStatusMessages(void) {
     if (!pipe) { printf("Cannot open endpoint 0x82: %s\n", err.localizedDescription.UTF8String); [ifc destroy]; return; }
     NSMutableData *data = [ifc ioDataWithCapacity:8 error:&err];
     for (int i = 0; i < 8; i++) {
-        NSUInteger n = 0;
-        if (![pipe sendIORequestWithData:data bytesTransferred:&n completionTimeout:0.25 error:&err]) {
-            printf("  message %d: none (%s)\n", i, err.localizedDescription.UTF8String);
+        // An interrupt endpoint accepts no completion timeout (kIOReturnBadArgument): read
+        // asynchronously, and abort after 1 s.
+        __block NSUInteger n = 0;
+        __block IOReturn status = kIOReturnSuccess;
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        if (![pipe enqueueIORequestWithData:data completionTimeout:0 error:&err
+                          completionHandler:^(IOReturn st, NSUInteger got) {
+                              status = st;
+                              n = got;
+                              dispatch_semaphore_signal(done);
+                          }]) {
+            printf("  message %d: cannot read (%s)\n", i, err.localizedDescription.UTF8String);
             break;
         }
+        if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC))) {
+            [pipe abortWithOption:IOUSBHostAbortOptionSynchronous error:nil];
+            dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+            printf("  message %d: none in 1 s\n", i);
+            break;
+        }
+        if (status != kIOReturnSuccess) { printf("  message %d: error 0x%08x\n", i, status); break; }
         const uint8_t *b = data.bytes;
         printf("  message %d:", i);
         for (NSUInteger k = 0; k < n; k++) printf(" %02x", b[k]);

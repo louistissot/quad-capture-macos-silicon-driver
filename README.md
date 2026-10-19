@@ -20,6 +20,8 @@ Macs with macOS 12 or earlier. With this driver, the QUAD-CAPTURE operates on Ap
   (see [Control panel](#control-panel)).
 - 44.1, 48, 96 and 192 kHz, 24-bit. Select the rate in Audio MIDI Setup or in your music app.
   At 192 kHz the QUAD-CAPTURE has only 2 inputs and 2 outputs: DIGITAL IN and DIGITAL OUT are silent.
+- With a digital source at COAXIAL IN, the QUAD-CAPTURE runs on the clock of that source. The
+  driver then uses the rate of the source, and other rates are not available.
 - The audio clock comes from the QUAD-CAPTURE itself, so there is no drift.
 - Output volume and mute: the macOS volume keys operate.
 - Hot-plug: the device shows when you connect the QUAD-CAPTURE and goes away when you disconnect it.
@@ -28,7 +30,7 @@ Macs with macOS 12 or earlier. With this driver, the QUAD-CAPTURE operates on Ap
 
 ## Status
 
-Version 0.2.0 is a beta version.
+Version 1.0.0. See [CHANGELOG.md](CHANGELOG.md).
 
 | Configuration | Status |
 |---|---|
@@ -108,6 +110,7 @@ sudo rm -rf /Library/Audio/Plug-Ins/HAL/QuadCapture.driver && sudo killall corea
 | The QUAD-CAPTURE device is not in the list | Disconnect the USB cable, wait 5 seconds, and connect it again. Make sure that the driver is installed: `ls /Library/Audio/Plug-Ins/HAL/`. |
 | No sound | Turn the OUTPUT and PHONES knobs up. Make sure that the macOS volume of the device is not at 0 and not muted. |
 | The device does not operate after it stopped abruptly | Disconnect the USB cable for 5 seconds, then connect it again. The firmware of the QUAD-CAPTURE can stop when its stream stops abruptly. |
+| After the installation, no app can use audio, and `coreaudiod` uses 100 % CPU | The installation restarts the macOS audio service. Some apps that use audio (seen with Unity apps) can then keep the audio service busy. Quit these apps, or restart the Mac. If possible, quit audio apps before you install. |
 
 To send a useful bug report, attach the driver log:
 

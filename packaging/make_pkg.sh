@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Build the installer packages in dist/:
-#   QuadCapture-Driver-<version>.pkg              installs the Core Audio plug-in
+#   QuadCapture-Driver-<version>.pkg              installs the Core Audio plug-in, the MIDI driver
+#                                                 and the QuadCapture Panel app
 #   QuadCapture-Driver-Uninstaller-<version>.pkg  removes it
 #   SHA256SUMS.txt
 # Optional signing and notarization (Apple Developer ID):
@@ -14,9 +15,10 @@ VERSION=$(cat VERSION)
 
 WORK=build/pkg
 rm -rf $WORK
-mkdir -p $WORK/root/Library/Audio/Plug-Ins/HAL "$WORK/root/Library/Audio/MIDI Drivers" $WORK/resources dist
+mkdir -p $WORK/root/Library/Audio/Plug-Ins/HAL "$WORK/root/Library/Audio/MIDI Drivers" $WORK/root/Applications $WORK/resources dist
 ditto build/QuadCapture.driver $WORK/root/Library/Audio/Plug-Ins/HAL/QuadCapture.driver
 ditto build/QuadCaptureMIDI.plugin "$WORK/root/Library/Audio/MIDI Drivers/QuadCaptureMIDI.plugin"
+ditto "build/QuadCapture Panel.app" "$WORK/root/Applications/QuadCapture Panel.app"
 cp packaging/resources/*.html $WORK/resources/
 cp LICENSE $WORK/resources/LICENSE.txt
 

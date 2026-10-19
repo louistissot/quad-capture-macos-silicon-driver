@@ -14,6 +14,7 @@
 // The object model follows the Apple "NullAudio" sample driver.
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <dispatch/dispatch.h>
 #include <math.h>
 #include <os/log.h>
 #include <pthread.h>
@@ -47,7 +48,7 @@ enum {
 //   'qsta' (read only): engine statistics.
 #define kQCPropertyConfig 'qcfg'
 #define kQCPropertyStats 'qsta'
-#define kQCStorageKey CFSTR("QuadCaptureConfig.v4")   // a new name discards the values of older versions
+#define kQCStorageKey CFSTR("QuadCaptureConfig.v5")   // a new name discards the values of older versions
 #define kQCVolumeStorageKey CFSTR("QuadCaptureVolume")
 #define kQCRateStorageKey CFSTR("QuadCaptureRate")
 
@@ -60,6 +61,7 @@ static UInt32 gIOClients;
 static Boolean gStreamActive[2] = {true, true};   // input, output
 static CFDictionaryRef gPendingConfig;             // set by 'qcfg', applied in PerformDeviceConfigurationChange
 static UInt32 gPendingRate;                        // a new nominal sample rate (0: none), applied there too
+static _Atomic uint32_t gExternalRate;             // rate of the COAXIAL IN clock, 0 if the clock is internal
 static atomic_bool gPresent;                       // the QUAD-CAPTURE is connected
 static _Atomic float gVolumeScalar = 1.0f;
 static atomic_bool gMute;
@@ -223,6 +225,8 @@ static void saveRate(void) {
 static OSStatus requestRate(Float64 rate) {
     UInt32 r = (UInt32)llround(rate);
     if (fabs(rate - r) > 0.5 || !qc_engine_rate_supported(r)) return kAudioDeviceUnsupportedFormatError;
+    const uint32_t ext = atomic_load(&gExternalRate);
+    if (ext && r != ext) return kAudioDeviceUnsupportedFormatError;   // the COAXIAL IN clock sets the rate
     if (r == qc_engine_get_rate()) return 0;
     pthread_mutex_lock(&gStateLock);
     gPendingRate = r;
@@ -254,6 +258,29 @@ static void presenceChanged(bool present) {
     }
     pthread_mutex_unlock(&gStateLock);
     notify(kObjectID_PlugIn, kAudioPlugInPropertyDeviceList, kAudioObjectPropertyOwnedObjects);
+}
+
+// The clock status of the device changed (qc_ctl, each second). With DIGITAL IN at AUTO, a signal at
+// COAXIAL IN makes the device run on that clock and rate; the Roland driver then restarts the
+// streams at that rate. Do the same, after the status stays the same for 2 s (so a change that our
+// own rate command causes does not start a loop).
+static void statusChanged(uint32_t rate, bool external, bool locked) {
+    const uint32_t ext = external && qc_engine_rate_supported(rate) ? rate : 0;
+    const uint32_t was = atomic_exchange(&gExternalRate, ext);
+    if (was != ext) {
+        os_log(gLog, "clock source: %{public}s %u Hz%{public}s", ext ? "COAXIAL IN" : "internal", rate,
+               external && !locked ? " (not locked)" : "");
+        notify(kObjectID_Device, kAudioDevicePropertyAvailableNominalSampleRates, 0);
+    }
+    if (!ext || ext == qc_engine_get_rate()) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        if (atomic_load(&gExternalRate) != ext || ext == qc_engine_get_rate()) return;
+        os_log(gLog, "following the COAXIAL IN clock: %u Hz", ext);
+        pthread_mutex_lock(&gStateLock);
+        gPendingRate = ext;
+        pthread_mutex_unlock(&gStateLock);
+        if (gHost) gHost->RequestDeviceConfigurationChange(gHost, kObjectID_Device, 2, NULL);
+    });
 }
 
 static bool objectExists(AudioObjectID obj) {
@@ -388,6 +415,7 @@ static OSStatus QC_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPl
     if (gHost) loadStored();
     qc_engine_watch_device(presenceChanged);   // sets gPresent before it returns
     qc_ctl_start();   // read the control channel (interface 2), so the front panel of the device operates
+    qc_ctl_set_status_callback(statusChanged);   // follow the COAXIAL IN clock (interface 3)
     gHostReady = true;
     os_log(gLog, "plug-in initialized; QUAD-CAPTURE %{public}s", atomic_load(&gPresent) ? "present" : "not present");
     return kAudioHardwareNoError;
@@ -549,7 +577,9 @@ static OSStatus propertySize(AudioObjectID obj, const AudioObjectPropertyAddress
         case kAudioDevicePropertyStreams: *size = deviceObjects(a->mScope, false, tmp) * sizeof(AudioObjectID); return 0;
         case kAudioObjectPropertyControlList: *size = 2 * sizeof(AudioObjectID); return 0;
         case kAudioDevicePropertyNominalSampleRate: *size = sizeof(Float64); return 0;
-        case kAudioDevicePropertyAvailableNominalSampleRates: *size = QC_NUM_RATES * sizeof(AudioValueRange); return 0;
+        case kAudioDevicePropertyAvailableNominalSampleRates:
+            *size = (atomic_load(&gExternalRate) ? 1 : QC_NUM_RATES) * sizeof(AudioValueRange);
+            return 0;
         case kAudioDevicePropertyPreferredChannelsForStereo: *size = 2 * sizeof(UInt32); return 0;
         case kAudioDevicePropertyPreferredChannelLayout: *size = layoutSize(a->mScope); return 0;
         case kAudioObjectPropertyCustomPropertyInfoList: *size = 2 * sizeof(AudioServerPlugInCustomPropertyInfo); return 0;
@@ -745,9 +775,15 @@ static OSStatus QC_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObj
         case kAudioDevicePropertyNominalSampleRate: NEED(sizeof(Float64)); *(Float64 *)outData = qc_engine_get_rate(); return 0;
         case kAudioDevicePropertyAvailableNominalSampleRates: {
             UInt32 n = inDataSize / sizeof(AudioValueRange);
-            if (n > QC_NUM_RATES) n = QC_NUM_RATES;
             AudioValueRange *v = outData;
-            for (UInt32 i = 0; i < n; i++) v[i].mMinimum = v[i].mMaximum = qc_engine_rates[i];
+            const uint32_t ext = atomic_load(&gExternalRate);
+            if (ext) {   // the COAXIAL IN clock sets the rate
+                if (n > 1) n = 1;
+                if (n) v[0].mMinimum = v[0].mMaximum = ext;
+            } else {
+                if (n > QC_NUM_RATES) n = QC_NUM_RATES;
+                for (UInt32 i = 0; i < n; i++) v[i].mMinimum = v[i].mMaximum = qc_engine_rates[i];
+            }
             *outDataSize = n * sizeof(AudioValueRange);
             return 0;
         }

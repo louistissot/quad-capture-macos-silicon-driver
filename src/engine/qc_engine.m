@@ -58,8 +58,10 @@ static dispatch_queue_t gQueue;
 static _Atomic int gCbPriority, gCbPolicy;
 
 // Configuration (changed only while the engine does not run).
-static int gNumReq = 32, gTpr = 32;              // 128 ms queue of 4 ms requests
-static uint32_t gOutMargin = 88, gInMargin = 88;   // 2 ms each (frames at 44.1 kHz)
+static int gNumReq = 8, gTpr = 128;              // 128 ms queue of 16 ms requests (fewer kernel calls:
+                                                  // 4.5 % of one core instead of 9.4 % with 4 ms requests)
+static uint32_t gOutMargin = 44, gInMargin = 44;   // 1 ms each (frames at 44.1 kHz); 0.5 ms passed a
+                                                  // full-CPU-load test too
 static uint32_t gRate = 44100;                     // Hz
 
 const uint32_t qc_engine_rates[QC_NUM_RATES] = {44100, 48000, 96000, 192000};
@@ -963,7 +965,9 @@ int qc_engine_start(void) {
             os_log_error(gLog, "cannot open the interfaces: %{public}s", err.localizedDescription.UTF8String);
             rc = -4; goto fail;
         }
-        if (![gIfOut selectAlternateSetting:alt error:&err] || ![gIfIn selectAlternateSetting:alt error:&err]) {
+        // Capture first, then playback, each through alternate setting 0, as the Roland driver does.
+        if (![gIfIn selectAlternateSetting:0 error:&err] || ![gIfIn selectAlternateSetting:alt error:&err] ||
+            ![gIfOut selectAlternateSetting:0 error:&err] || ![gIfOut selectAlternateSetting:alt error:&err]) {
             os_log_error(gLog, "cannot select alternate setting: %{public}s", err.localizedDescription.UTF8String);
             rc = -5; goto fail;
         }

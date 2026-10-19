@@ -1,7 +1,19 @@
 # Change log
 
-## Unreleased
+## 1.0.0
 
+- New app **QuadCapture Panel** (in the Applications folder): preamp (SENS, LO-CUT, PHASE),
+  compressor, stereo link and monitor mixer settings, as in the Roland control panel.
+- MIDI IN and MIDI OUT (CoreMIDI driver).
+- The driver reads the clock status of the device each second, as the Roland driver does. With a
+  signal at COAXIAL IN (DIGITAL IN = AUTO), the device runs on that clock; the driver then follows
+  the rate of the device and refuses other rates.
+- The streams start with the capture interface first, as the Roland driver does.
+- Half the CPU load: the USB requests are 16 ms long (were 4 ms); the driver process uses 4.5 % of
+  one core (was 9.4 %) at 44.1 kHz.
+- Lower latency: safety offsets 2.4 ms input and 2.0 ms output (were 3.4 ms and 3.0 ms). The
+  stored queue settings of older versions are ignored.
+- The installer installs the audio driver, the MIDI driver and the panel app.
 - Sample rates 48, 96 and 192 kHz (was 44.1 kHz only). Select the rate in Audio MIDI Setup or in
   an app. The driver sets the clock of the QUAD-CAPTURE with a vendor request when the stream
   starts (the change takes about 1 s). The driver keeps the selected rate after a restart.
