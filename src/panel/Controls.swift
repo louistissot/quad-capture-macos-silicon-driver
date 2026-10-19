@@ -147,6 +147,34 @@ struct MeterBar: View {
     }
 }
 
+// The gain reduction of a compressor: a bar from the top down, 0 to 20 dB.
+struct ReductionBar: View {
+    @ObservedObject var meters: MeterModel
+    let index: Int
+    let on: Bool
+    var height: CGFloat = 120
+
+    var body: some View {
+        let r = meters.reduction[index]
+        VStack(spacing: 3) {
+            Spacer().frame(height: 7)
+            GeometryReader { g in
+                ZStack(alignment: .top) {
+                    RoundedRectangle(cornerRadius: 2).fill(Color.secondary.opacity(0.15))
+                    Rectangle().fill(Color.orange).frame(height: g.size.height * CGFloat(min(20, max(0, r)) / 20))
+                }
+            }
+            .frame(width: 9, height: height)
+            .opacity(on ? 1 : 0.35)
+            Text("GR").font(.system(size: 9)).foregroundColor(.secondary).lineLimit(1).fixedSize()
+        }
+        .help("Gain reduction of the compressor (0 to 20 dB, from the top)")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Gain reduction")
+        .accessibilityValue(String(format: "%.1f dB", r))
+    }
+}
+
 // A scale for the meters: 0, -6, -12, -24, -40, -60 dB.
 struct MeterScale: View {
     var height: CGFloat = 120

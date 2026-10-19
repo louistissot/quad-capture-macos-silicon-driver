@@ -82,9 +82,9 @@ not operate on Apple Silicon Macs. It shows and changes these settings of IN 1 a
 - The monitor mixer levels in OUTPUT 1-2: INPUT 1, INPUT 2 and COAX.
 - The sample rate of the device (as in Audio MIDI Setup).
 
-It also shows level meters for IN 1, IN 2, COAX IN and OUTPUT. The QUAD-CAPTURE sends the meter
-data itself, so the meters need no audio stream and no microphone permission. They operate only
-while the window is visible.
+It also shows level meters for IN 1, IN 2, the compressor outputs, the gain reduction of the
+compressors, and OUTPUT. The QUAD-CAPTURE sends the meter data itself, so the meters need no audio
+stream and no microphone permission. They operate only while the window is visible.
 
 Turn a knob with the mouse: drag up or down. Double-click a knob to set its factory value.
 

@@ -4,8 +4,8 @@
 
 - New app **QuadCapture Panel** (in the Applications folder): preamp (SENS, LO-CUT, PHASE,
   AUTO-SENS), compressor with a curve graph, stereo link, monitor mixer and sample rate, as in the
-  Roland control panel. Knobs, and level meters for IN 1, IN 2, COAX IN and OUTPUT (the device sends
-  the meter data: no audio stream, no microphone permission). Optional web panel for a phone on the
+  Roland control panel. Knobs, and level meters for IN 1, IN 2, the compressor outputs, the gain
+  reduction and OUTPUT (the device sends the meter data: no audio stream, no microphone permission). Optional web panel for a phone on the
   local network (off by default, with a random key).
 - MIDI IN and MIDI OUT (CoreMIDI driver).
 - The driver reads the clock status of the device each second, as the Roland driver does. With a

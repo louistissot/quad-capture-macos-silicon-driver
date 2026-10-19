@@ -140,17 +140,19 @@ enum MixerLevel {
 // MARK: - Meter data
 
 enum MeterData {
-    // The 16 data bytes are 8 pairs; the panel uses the first 6: IN 1, IN 2, COAX L, COAX R, OUT L,
-    // OUT R. 7F 7F = no value. Probable scale: high x 128 + low = linear amplitude, 16383 = full
-    // scale (docs/PROTOCOL.md, "Level meter"; a calibrated test is not done yet).
-    static func decibels(_ d: [UInt8]) -> [Float?] {
-        guard d.count == 16 else { return [] }
-        return (0..<6).map { i in
-            let hi = d[2 * i], lo = d[2 * i + 1]
-            if hi == 0x7F && lo == 0x7F { return nil }
-            let v = Int(hi) << 7 | Int(lo)
-            return v == 0 ? -.infinity : Float(20 * log10(Double(v) / 16383))
-        }
+    // The 16 data bytes are 8 values of 14 bits: high x 128 + low (the method of the Roland driver).
+    // Values 1-6 are levels: preamp IN 1, IN 2, compressor output 1, 2 (0 in BYPASS), OUTPUT L, R.
+    // Values 7-8 are the gain reduction of compressor 1, 2: 16383 = no reduction. Linear scale,
+    // 16383 = full scale (docs/PROTOCOL.md, "Level meter"; a test at full scale is not done yet).
+    static func value(_ d: [UInt8], _ i: Int) -> Int { Int(d[2 * i] & 0x7F) << 7 | Int(d[2 * i + 1] & 0x7F) }
+
+    static func decibels(_ v: Int) -> Float { v <= 0 ? -.infinity : Float(20 * log10(Double(v) / 16383)) }
+
+    static func decode(_ d: [UInt8]) -> (levels: [Float?], reduction: [Float]) {
+        guard d.count == 16 else { return ([], []) }
+        let levels: [Float?] = (0..<6).map { decibels(value(d, $0)) }
+        let reduction = (6..<8).map { min(60, -decibels(value(d, $0))) }
+        return (levels, reduction)
     }
 }
 
@@ -333,7 +335,8 @@ final class PanelModel: ObservableObject {
                     meterDataSeen = true
                     addLog("Received meter data \(hex(data)) (this line only once after each \"meter on\")")
                 }
-                meters.note(MeterData.decibels(data))
+                let m = MeterData.decode(data)
+                meters.note(m.levels, reduction: m.reduction)
             }
             return
         }

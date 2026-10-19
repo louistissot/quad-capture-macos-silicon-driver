@@ -9,8 +9,9 @@
 import CoreAudio
 import Foundation
 
-// The levels that the meters show, in dBFS, for the 6 meter channels of the device: IN 1, IN 2,
-// COAX L, COAX R, OUT L, OUT R. A separate object, so that the meter updates redraw only the meters.
+// The levels that the meters show, in dBFS, for the 6 level channels of the device: preamp IN 1,
+// IN 2, compressor output 1, 2, OUTPUT L, R. Also the gain reduction of compressor 1 and 2, in dB
+// (0 = no reduction). A separate object, so that the meter updates redraw only the meters.
 final class MeterModel: ObservableObject {
     static let channels = 6
     static let floor: Float = -60
@@ -19,15 +20,19 @@ final class MeterModel: ObservableObject {
     @Published var hold = [Float](repeating: MeterModel.floor, count: MeterModel.channels)    // peak hold, 1.5 s
     @Published var clip = [Bool](repeating: false, count: MeterModel.channels)                 // click to reset
     @Published var active = [Bool](repeating: false, count: MeterModel.channels)
+    @Published var reduction: [Float] = [0, 0]                                               // dB, returns 20 dB/s
     private var pending = [Float](repeating: -.infinity, count: MeterModel.channels)
+    private var pendingReduction: [Float] = [0, 0]
     private var holdTime = [Double](repeating: 0, count: MeterModel.channels)
     private var lastData = Date.distantPast
     private var lastTick = Date()
     private var timer: Timer?
 
-    // A meter message from the device: one value in dBFS for each channel (nil: no value).
-    func note(_ db: [Float?]) {
+    // A meter message from the device: one value in dBFS for each channel (nil: no value), and the
+    // gain reduction of the two compressors in dB.
+    func note(_ db: [Float?], reduction gr: [Float] = []) {
         lastData = Date()
+        for i in 0..<min(gr.count, 2) { pendingReduction[i] = max(pendingReduction[i], gr[i]) }
         for i in 0..<min(db.count, MeterModel.channels) {
             guard let v = db[i] else { continue }
             pending[i] = max(pending[i], v)
@@ -57,10 +62,16 @@ final class MeterModel: ObservableObject {
                 hold[i] = max(MeterModel.floor, hold[i] - 20 * dt)
             }
         }
+        var reduction = self.reduction
+        for i in 0..<2 {
+            reduction[i] = max(pendingReduction[i], reduction[i] - 20 * dt)
+            pendingReduction[i] = 0
+        }
         if level != self.level { self.level = level }
         if hold != self.hold { self.hold = hold }
+        if reduction != self.reduction { self.reduction = reduction }
         // No data for 1 s: the meter is off. Stop the timer when all meters are at the floor.
-        if now.timeIntervalSince(lastData) > 1, level.allSatisfy({ $0 <= MeterModel.floor }) {
+        if now.timeIntervalSince(lastData) > 1, level.allSatisfy({ $0 <= MeterModel.floor }), reduction.allSatisfy({ $0 <= 0 }) {
             reset()
         }
     }
@@ -72,6 +83,8 @@ final class MeterModel: ObservableObject {
         hold = level
         active = [Bool](repeating: false, count: MeterModel.channels)
         pending = [Float](repeating: -.infinity, count: MeterModel.channels)
+        reduction = [0, 0]
+        pendingReduction = [0, 0]
     }
 }
 

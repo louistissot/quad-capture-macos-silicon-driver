@@ -206,12 +206,22 @@ device sends DT1 messages to `00 0a 00 01` with 16 data bytes, several times per
 cable 1. The meter needs no audio stream. Tested on 19 October 2026:
 
 - The device sends the DT1 `00 0a 00 00` back, as for the other parameters.
-- The 16 bytes are 8 pairs. Pairs 1 to 6 are probably IN 1, IN 2, COAX L, COAX R, OUT L, OUT R.
-  Pairs 7 and 8 were always `7f 7f`.
-- Probable value: high byte x 128 + low byte, a linear amplitude with 16383 = full scale. Facts
-  that agree: the input noise was 2 to 3 (about -75 dBFS) with SENS at 25-27 dB; OUT was about
-  IN 1 + IN 2 (direct monitor at 0 dB); a short sound gave IN 1 = IN 2 = 0x15 and OUT = 0x29.
-  A calibrated test with a known level is not done yet.
+- The 16 bytes are 8 values of 14 bits: value = (high & 0x7f) x 128 + (low & 0x7f). The Roland
+  kext decodes them in this way. It keeps the maximum of values 1-6 and the minimum of values 7-8
+  between two reads of its app.
+
+| Value | Meter |
+|---|---|
+| 1, 2 | Preamp input IN 1, IN 2 |
+| 3, 4 | Compressor output IN 1, IN 2 (0 while the compressor is in BYPASS) |
+| 5, 6 | OUTPUT 1-2 L, R (after the monitor mixer) |
+| 7, 8 | Gain reduction of compressor 1, 2: 16383 (`7f 7f`) = no reduction |
+
+- Scale: linear amplitude, 16383 = full scale (dB = 20 log10(value / 16383)). Facts that agree:
+  the input noise was 2 to 3 (about -75 dBFS) with SENS at 25-27 dB; OUT was about IN 1 + IN 2
+  (direct monitor at 0 dB); a short sound gave IN 1 = IN 2 = 0x15 and OUT = 0x29. With the
+  compressor of IN 1 on, value 3 changed from 0 to 2-3 and value 7 from 16383 to 16381. A test at
+  full scale is not done yet.
 - Example (quiet): `00 03 00 02 00 00 00 00 00 05 04 09 7f 7f 7f 7f`.
 
 The panel turns the meter on only while its window is visible, and turns it off before it closes

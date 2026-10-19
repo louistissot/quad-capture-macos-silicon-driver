@@ -293,6 +293,7 @@ final class WebPanel: ObservableObject {
             "mixer": m.mixer.map { ["db": $0 <= 0 ? -61 : max(-60, MixerLevel.decibels($0)), "t": MixerLevel.text($0)] },
             "autoSens": m.autoSens, "rate": audio.sampleRate, "rates": audio.availableRates,
             "meters": meters.active.contains(true) ? meters.level.map { Double($0) } : [], "clip": meters.clip,
+            "reduction": meters.reduction.map { Double($0) },
         ]
     }
 
@@ -369,7 +370,8 @@ button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
 <section id="in0"><h2>IN 1</h2></section>
 <section id="in1"><h2>IN 2</h2></section>
 <section><h2>Monitor mixer (OUTPUT 1-2)</h2><div id="mix"></div>
-<div class="row"><span>COAX level</span><div><div class="m"><i id="m2"></i></div></div><span></span></div>
+<div class="row"><span>OUTPUT L</span><div><div class="m"><i id="m4"></i></div></div><span></span></div>
+<div class="row"><span>OUTPUT R</span><div><div class="m"><i id="m5"></i></div></div><span></span></div>
 <p><label class="t"><input type="checkbox" id="link"> Stereo link</label>
 <button id="as">AUTO-SENS</button></p>
 <p>Sample rate <select id="rate"></select></p></section>
@@ -416,7 +418,7 @@ async function poll(){
  const sel=document.getElementById('rate');
  if(sel.options.length!=s.rates.length){sel.innerHTML=s.rates.map(r=>'<option value='+r+'>'+r/1000+' kHz</option>').join('')}
  if(document.activeElement!=sel)sel.value=s.rate;
- for(let i=0;i<3;i++)bar(i,s.meters.length?s.meters[i]:null);
+ for(const i of [0,1,4,5])bar(i,s.meters.length?s.meters[i]:null);
  }catch(e){document.getElementById('st').textContent='No connection to the Mac'}
  setTimeout(poll,150);
 }

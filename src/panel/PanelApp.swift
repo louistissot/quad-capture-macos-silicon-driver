@@ -233,7 +233,11 @@ struct CompressorSection: View {
                 .help("Compressor of IN \(ch + 1): ON, or BYPASS (off).")
         }) {
             VStack(spacing: 8) {
-                CompressorGraph(settings: model.inputs[ch]).frame(width: 150, height: 150)
+                HStack(alignment: .top, spacing: 6) {
+                    CompressorGraph(settings: model.inputs[ch]).frame(width: 150, height: 150)
+                    ReductionBar(meters: model.meters, index: ch, on: on, height: 128)
+                    MeterBar(meters: model.meters, channel: 2 + ch, label: "OUT", height: 128)
+                }
                 HStack(spacing: 2) {
                     ParameterKnob(model: model, ch: ch, p: .threshold, title: "THRESHOLD", size: 38)
                     ParameterKnob(model: model, ch: ch, p: .ratio, title: "RATIO", size: 38)
@@ -263,13 +267,6 @@ struct MixerSection: View {
                         MixerKnob(model: model, index: 0, title: "INPUT 1")
                         MixerKnob(model: model, index: 1, title: "INPUT 2")
                         MixerKnob(model: model, index: 2, title: "COAX")
-                    }
-                    VStack(spacing: 2) {
-                        HStack(spacing: 4) {
-                            MeterBar(meters: model.meters, channel: 2, label: "L", height: 150)
-                            MeterBar(meters: model.meters, channel: 3, label: "R", height: 150)
-                        }
-                        Text("COAX IN").font(.system(size: 9)).foregroundColor(.secondary)
                     }
                     VStack(spacing: 2) {
                         HStack(spacing: 4) {
