@@ -19,6 +19,7 @@ FW=(-framework Foundation -framework IOKit -framework IOUSBHost)
 clang $COMMON $OBJC -o build/qc_descriptors tools/qc_descriptors.m $FW
 clang $COMMON $OBJC -o build/qc_capture tools/qc_capture.m $FW
 clang $COMMON $OBJC -o build/qc_rate tools/qc_rate.m $FW
+clang $COMMON $OBJC -o build/qc_sysex tools/qc_sysex.m src/midi/qc_usbmidi.c $FW
 clang $COMMON $OBJC -o build/qc_engine_test tools/qc_engine_test.m src/engine/qc_engine.m $FW
 clang $COMMON -o build/qc_hal_test tools/qc_hal_test.c -framework CoreAudio -framework CoreFoundation
 clang $COMMON -o build/qc_midi_codec_test tools/qc_midi_codec_test.c src/midi/qc_usbmidi.c
@@ -30,9 +31,10 @@ mkdir -p $DRV/Contents/MacOS
 sed "s/@VERSION@/$VERSION/g" src/driver/Info.plist > $DRV/Contents/Info.plist
 clang $COMMON -x c -c -o build/qc_driver.o src/driver/qc_driver.c
 clang $COMMON $OBJC -c -o build/qc_engine.o src/engine/qc_engine.m
-clang $COMMON -bundle -o $DRV/Contents/MacOS/QuadCapture build/qc_driver.o build/qc_engine.o \
+clang $COMMON $OBJC -c -o build/qc_ctl.o src/engine/qc_ctl.m
+clang $COMMON -bundle -o $DRV/Contents/MacOS/QuadCapture build/qc_driver.o build/qc_engine.o build/qc_ctl.o \
     $FW -framework CoreAudio -framework CoreFoundation
-rm -f build/qc_driver.o build/qc_engine.o
+rm -f build/qc_driver.o build/qc_engine.o build/qc_ctl.o
 
 # CoreMIDI driver (MIDI IN / MIDI OUT).
 MID=build/QuadCaptureMIDI.plugin

@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "engine/qc_engine.h"
+#include "engine/qc_ctl.h"
 
 enum {
     kObjectID_PlugIn = kAudioObjectPlugInObject,
@@ -386,6 +387,7 @@ static OSStatus QC_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPl
     gHost = inHost;
     if (gHost) loadStored();
     qc_engine_watch_device(presenceChanged);   // sets gPresent before it returns
+    qc_ctl_start();   // read the control channel (interface 2), so the front panel of the device operates
     gHostReady = true;
     os_log(gLog, "plug-in initialized; QUAD-CAPTURE %{public}s", atomic_load(&gPresent) ? "present" : "not present");
     return kAudioHardwareNoError;

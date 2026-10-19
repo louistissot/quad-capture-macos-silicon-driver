@@ -13,7 +13,9 @@
 #include <mach/mach_time.h>
 #include <os/lock.h>
 #include <os/log.h>
+#include <notify.h>
 #include "qc_usbmidi.h"
+#include "engine/qc_ctl.h"
 
 #define QC_VID 0x0582
 #define QC_PID 0x012f
@@ -90,6 +92,8 @@ static void onRead(int k, IOReturn status, NSUInteger n) {
     MIDIPacket *pkt = MIDIPacketListInit(list);
     const MIDITimeStamp now = mach_absolute_time();
     for (NSUInteger i = 0; i + 4 <= n; i += 4) {
+        // Cable 1 carries the Roland control messages (SENS knobs, AUTO-SENS): not MIDI for the apps.
+        if ((data[i] >> 4) != 0) continue;
         uint8_t bytes[3];
         int count = qc_midi_decode(data + i, bytes);
         if (count == 0) continue;
@@ -163,6 +167,25 @@ static void closeUSB(void) {
     os_log(gLog, "MIDI: QUAD-CAPTURE offline");
 }
 
+static void openUSB(io_service_t svc);
+
+// Interface 2 is busy: the audio driver reads the control channel there while no MIDI client runs
+// (see qc_ctl.h). Ask it to release the interface, and try again each 250 ms for 3 s.
+static int gOpenAttempts;
+static void retryOpen(void) {
+    if (gIface) return;
+    if (gOpenAttempts == 0) notify_post(QC_CTL_WANT_NOTIFICATION);
+    if (++gOpenAttempts > 12) {
+        os_log_error(gLog, "MIDI: interface 2 stays busy");
+        gOpenAttempts = 0;
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), gQueue, ^{
+        io_service_t s = findService(true);
+        if (s) { openUSB(s); IOObjectRelease(s); }
+    });
+}
+
 static void openUSB(io_service_t svc) {
     if (gIface) return;
     NSError *err = nil;
@@ -173,9 +196,13 @@ static void openUSB(io_service_t svc) {
               if (type == kIOMessageServiceIsTerminated) closeUSB();
           }];
     if (!iface) {
-        os_log_error(gLog, "MIDI: cannot open interface 2: %{public}s", err.localizedDescription.UTF8String);
+        if (gOpenAttempts == 0)
+            os_log(gLog, "MIDI: interface 2 is busy (%{public}s); asking the audio driver to release it",
+                   err.localizedDescription.UTF8String);
+        retryOpen();
         return;
     }
+    gOpenAttempts = 0;
     IOUSBHostPipe *outPipe = [iface copyPipeWithAddress:EP_OUT error:&err];
     IOUSBHostPipe *inPipe = [iface copyPipeWithAddress:EP_IN error:&err];
     if (!outPipe || !inPipe) {

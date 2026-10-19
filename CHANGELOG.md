@@ -7,6 +7,13 @@
   starts (the change takes about 1 s). The driver keeps the selected rate after a restart.
 - At 192 kHz the device has 2 inputs and 2 outputs; the DIGITAL channels are silent.
 - The safety margins scale with the sample rate.
+- Fix: the front panel of the QUAD-CAPTURE (SENS rings, AUTO-SENS, DIRECT MONITOR) stopped
+  after some use. The device sends a message for each SENS knob step on its control channel
+  (interface 2), and its queue filled when no process read it. The audio driver now reads the
+  control channel at all times, and gives it to the MIDI driver when a MIDI app runs.
+- The MIDI driver no longer sends the Roland control messages (cable 1) to MIDI apps.
+- The control-panel protocol (Roland SysEx: preamp, compressor, monitor mixer) is documented in
+  docs/PROTOCOL.md. New tool `build/qc_sysex` reads the settings, watches them, and can change them.
 - New tool `build/qc_rate` reads and changes the device rate. `qc_hal_test -r` and
   `qc_engine_test -r` test a rate.
 

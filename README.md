@@ -38,9 +38,11 @@ If you use a Mac that is not in the table, please send a
 
 ### Known limits
 
-- **No Roland control panel.** The functions of the Roland control panel (input mixer, compressor,
-  AUTO-SENS settings) are not available. The knobs and the switches on the QUAD-CAPTURE operate
-  as usual.
+- **No Roland control panel app.** The settings that only the Roland control panel changes
+  (compressor, LO-CUT, PHASE, monitor mixer levels) have no app yet. The protocol is known (see
+  [docs/PROTOCOL.md](docs/PROTOCOL.md)), and `build/qc_sysex` can read and change them. The knobs
+  and the buttons on the QUAD-CAPTURE (SENS, AUTO-SENS, DIRECT MONITOR, MIX, OUTPUT, PHONES)
+  operate as usual.
 - **No MIDI yet.** The MIDI IN and MIDI OUT ports are not available yet.
 - **Unsigned packages.** The packages do not have an Apple Developer ID signature, so macOS shows
   a warning when you open them. See [Install](#install).
@@ -61,6 +63,9 @@ If you use a Mac that is not in the table, please send a
 6. In System Settings > Sound, or in your music app, select **QUAD-CAPTURE**.
 
 To hear your inputs with no delay, use the DIRECT MONITOR control on the QUAD-CAPTURE.
+
+If the recorded level is low, turn the SENS knob of the input up, or press AUTO-SENS and play
+at your loudest level. With the SENS knobs at minimum, the preamp gain is 0 dB.
 
 ## Uninstall
 
@@ -137,6 +142,7 @@ sudo rm -rf /Library/Audio/Plug-Ins/HAL/QuadCapture.driver && sudo cp -R build/Q
 | `build/qc_engine_test [-T]` | Uses the USB engine directly, with no installed driver. |
 | `build/qc_capture [-T]` | Low-level USB recorder and tone test. |
 | `build/qc_descriptors` | Prints the USB descriptors. |
+| `build/qc_sysex [-m seconds]` | Reads the control-panel settings of the device (SENS, compressor, mixer), or watches their changes. `-w` changes a setting. |
 | `build/qc_rate [hz]` | Reads the sample rate of the device, or changes it (44100, 48000, 96000, 192000). Use it only while no app uses the QUAD-CAPTURE. |
 
 CAUTION: Before you use `-T`, set the volume of your speakers and headphones low.

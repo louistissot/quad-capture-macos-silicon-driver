@@ -64,10 +64,120 @@ describes the behavior in our own words.
 
 ### Control panel (SysEx)
 
-The Roland control panel (input mixer, compressor, AUTO-SENS) sends Roland System Exclusive
-messages. The Roland driver puts them in USB-MIDI event packets on the MIDI bulk endpoints of
-interface 2 with **cable number 1** (normal MIDI uses cable 0). The content of these messages
-(addresses and values) is not known yet.
+The settings of the preamps, the compressors and the monitor mixer are Roland System Exclusive
+messages. They use the MIDI bulk endpoints of interface 2 (`0x06` OUT, `0x86` IN), in USB-MIDI
+event packets with **cable number 1**. MIDI IN and MIDI OUT use cable 0.
+
+Source: a study of the Roland control panel app and of `RDUSB012FDev.kext` (version 1.5.6), for
+interoperability only. The app does not make SysEx: it sends a small command (command number,
+channel, value) to the kext, and the kext makes the SysEx message. The project contains no Roland
+code. Items marked "not tested" come only from that study.
+
+#### Message format
+
+| Message | Bytes |
+|---|---|
+| Header | `F0 41 10 00 00 56`: Roland, device ID `10`, model ID `00 00 56` |
+| DT1 (data set) | header, `12`, address (4 bytes), data, checksum, `F7` |
+| RQ1 (data request) | header, `11`, address (4 bytes), size (4 bytes), checksum, `F7` |
+
+The checksum makes the sum of the address, the data (or the size) and the checksum a multiple
+of 128: `checksum = (128 - (sum & 0x7F)) & 0x7F`. All data bytes are 7-bit values.
+
+#### Parameters (DT1, 1 data byte)
+
+`c` is the input channel: 0 = IN 1, 1 = IN 2.
+
+| Address | Parameter | Values |
+|---|---|---|
+| `00 05 0c 01` | LO-CUT | 0 off, 1 on |
+| `00 05 0c 02` | PHASE (polarity) | 0 normal, 1 inverted |
+| `00 05 0c 04` | SENS (input gain) | 0 to 108 = 0 to 54 dB in 0.5 dB steps |
+| `00 05 00 05` | Stereo link of IN 1 and IN 2 | 0 off, 1 on |
+| `00 05 0c 06` | Compressor on | 0 off (BYPASS), 1 on |
+| `00 05 0c 07` | Gate | 0 = -INF (off), 1 to 50 = -69 to -20 dB |
+| `00 05 0c 08` | Attack | 0 to 25: 0.2, 0.5, 1, 2, 4, 6, 8, 10, 15 ... 100 ms (steps of 5 ms above 10 ms) |
+| `00 05 0c 09` | Release | 0 to 45: 10, 12, 15, 18, 20, 25 ... 100 (steps of 5), 110 ... 200 (steps of 10), 220 ... 500 ms (steps of 20) |
+| `00 05 0c 0a` | Threshold | 0 to 50 = -50 to 0 dB |
+| `00 05 0c 0b` | Ratio | 0 to 8 = 1:1.0, 1:1.2, 1:1.5, 1:2.0, 1:2.8, 1:4.0, 1:8.0, 1:16, 1:INF |
+| `00 05 0c 0c` | Gain (make-up) | 0 to 74 = -50 to +24 dB (text table of the app; not tested) |
+| `00 03 00 00` | Output select | value from the app (meaning not known yet) |
+| `00 02 00 04` | DIGITAL IN setting | value from the app (meaning not known yet) |
+| `00 02 01 00` | AUTO-SENS mode | value from the app |
+| `00 02 01 01` | AUTO-SENS margin | value from the app ("Margin [dB]") |
+| `00 02 01 02` | AUTO-SENS start/stop | value from the app |
+| `00 0a 00 00` | Level meter on/off | value from the app |
+| `00 00 00 02` | Initialize (the app sends 0 after "OK to initialize the current settings?") | not tested: it resets all settings |
+
+#### Monitor mixer (DT1, 6 data bytes)
+
+The MIXER section of the panel sets the level of each input in OUTPUT 1-2 (direct monitor).
+
+| Address | Level |
+|---|---|
+| `00 06 00 08` | INPUT 1 |
+| `00 06 01 08` | INPUT 2 |
+| `00 06 02 08` | COAX (DIGITAL IN 3/4) |
+
+The data is a 24-bit linear gain in 6 bytes of 4 bits each, high nibble first.
+`0x200000` = 0 dB, `0x7FFFFF` = +12 dB, 0 = -INF. Example: 0 dB = `02 00 00 00 00 00`.
+
+#### State block (RQ1 and DT1 at `01 00 00 00`, 59 bytes)
+
+The app reads all settings with RQ1, address `01 00 00 00`, size `00 00 00 3B` (59 bytes):
+`F0 41 10 00 00 56 11 01 00 00 00 00 00 00 3B 44 F7`. The device answers with a DT1 of 59 data
+bytes to the same address. The kext can also write the full block with one DT1 to that address.
+
+| Data byte | Content |
+|---|---|
+| 0-7 | 32-bit value in 8 nibbles (not known; the kext only copies it back) |
+| 8-15 | 32-bit value in 8 nibbles (not known; the kext only copies it back) |
+| 16-19 | Device settings (names not known yet; bytes 17, 18 and 19 are 0 or 1) |
+| 20 | 6 in all tests; probably the AUTO-SENS margin in dB (not tested) |
+| 21 | AUTO-SENS state: 0 = off, 2 = measurement in progress (SENS shows 0), 1 = measurement complete |
+| 22 | Output select |
+| 23 | LO-CUT: bit 0 = IN 1, bit 1 = IN 2 |
+| 24 | PHASE: bit 0 = IN 1, bit 1 = IN 2 |
+| 25, 26 | SENS of IN 1, IN 2 |
+| 27 | Stereo link (bit 0) |
+| 28 | Compressor on: bit 0 = IN 1, bit 1 = IN 2 |
+| 29, 30 | Gate of IN 1, IN 2 |
+| 31, 32 | Attack of IN 1, IN 2 |
+| 33, 34 | Release of IN 1, IN 2 |
+| 35, 36 | Threshold of IN 1, IN 2 |
+| 37, 38 | Ratio of IN 1, IN 2 |
+| 39, 40 | Gain of IN 1, IN 2 |
+| 41-46 | Mixer level INPUT 1 (24-bit, 6 nibbles) |
+| 47-52 | Mixer level INPUT 2 |
+| 53-58 | Mixer level COAX |
+
+#### Behavior found in tests (19 October 2026)
+
+- The device answers the RQ1 at once, also when no audio stream runs.
+- Factory values seen: compressor off, threshold -20 dB, ratio 1:4, attack 2 ms, release
+  200 ms, gain 0 dB, gate -INF, mixer levels 0 dB.
+- **The SENS knobs operate in the device.** A turn of SENS 1L or SENS 2R changes the gain at
+  once, and the device sends a DT1 message for each step on cable 1, for example
+  `F0 41 10 00 00 56 12 00 05 00 04 3A 3D F7` (IN 1 SENS = 0x3A = 29 dB). The driver does not
+  have to answer these messages. With the SENS knobs at minimum, the gain is 0 dB and the
+  recorded level is very low.
+- **AUTO-SENS operates in the device.** The device sends `00 02 01 02` = 0 when the measurement
+  starts, sets byte 21 of the state block, and sets the SENS values when the measurement ends.
+- **The host must read interface 2 at all times.** If no process reads the bulk IN endpoint
+  `0x86`, the messages of the SENS knobs and of AUTO-SENS stay in the queue of the device. When
+  the queue is full, the front panel stops: the SENS rings go dark, and AUTO-SENS and DIRECT
+  MONITOR do not respond. Audio continues. A read of the queue makes the panel operate again
+  (the waiting knob and button events are then processed). The Roland driver always reads
+  interface 2. In this project, the audio plug-in reads it (`src/engine/qc_ctl.m`) while no
+  other process uses it; the MIDI driver and `qc_sysex` post the notification
+  `com.louistissot.quadcapture.interface2.want`, and the plug-in releases the interface for 5 s.
+- The MIDI driver ignores cable 1, so the control messages do not go to MIDI apps.
+- **DIRECT MONITOR, MIX, OUTPUT and PHONES** operate in the device. They do not change the state
+  block and the device sends no message for them.
+
+`build/qc_sysex` sends the RQ1 and decodes the reply. `build/qc_sysex -m <seconds>` reads the
+state block each 300 ms and prints each change and each message from the device. `build/qc_sysex -w <address> <data...>`
+sends a DT1.
 
 ### Channels
 
