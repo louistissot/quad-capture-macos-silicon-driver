@@ -18,6 +18,7 @@ FW=(-framework Foundation -framework IOKit -framework IOUSBHost)
 
 clang $COMMON $OBJC -o build/qc_descriptors tools/qc_descriptors.m $FW
 clang $COMMON $OBJC -o build/qc_capture tools/qc_capture.m $FW
+clang $COMMON $OBJC -o build/qc_rate tools/qc_rate.m $FW
 clang $COMMON $OBJC -o build/qc_engine_test tools/qc_engine_test.m src/engine/qc_engine.m $FW
 clang $COMMON -o build/qc_hal_test tools/qc_hal_test.c -framework CoreAudio -framework CoreFoundation
 clang $COMMON -o build/qc_midi_codec_test tools/qc_midi_codec_test.c src/midi/qc_usbmidi.c

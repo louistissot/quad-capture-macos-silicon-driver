@@ -3,7 +3,10 @@
 // The plug-in publishes one device ("QUAD-CAPTURE") while the QUAD-CAPTURE is connected:
 //   input stream:  IN 1, IN 2, DIGITAL IN L, DIGITAL IN R
 //   output stream: OUT 1L, OUT 2R, DIGITAL OUT L, DIGITAL OUT R (OUT 1L/2R also feed PHONES)
-//   32-bit float, 44.1 kHz; an output volume control and an output mute control.
+//   32-bit float, 44.1, 48, 96 or 192 kHz (at 192 kHz the DIGITAL channels are silent);
+//   an output volume control and an output mute control.
+// A change of the nominal sample rate is a device configuration change: the engine stops, sets
+// the device clock, and starts again. The plug-in keeps the rate in the host storage.
 // The USB engine (qc_engine) runs inside the plug-in host process. It starts when the first client
 // starts IO and stops (clean drain) when the last client stops IO. The device clock comes from the
 // zero timestamps of the engine, so it follows the QUAD-CAPTURE clock.
@@ -45,6 +48,7 @@ enum {
 #define kQCPropertyStats 'qsta'
 #define kQCStorageKey CFSTR("QuadCaptureConfig.v4")   // a new name discards the values of older versions
 #define kQCVolumeStorageKey CFSTR("QuadCaptureVolume")
+#define kQCRateStorageKey CFSTR("QuadCaptureRate")
 
 static os_log_t gLog;
 static pthread_mutex_t gStateLock = PTHREAD_MUTEX_INITIALIZER;
@@ -54,6 +58,7 @@ static bool gHostReady;
 static UInt32 gIOClients;
 static Boolean gStreamActive[2] = {true, true};   // input, output
 static CFDictionaryRef gPendingConfig;             // set by 'qcfg', applied in PerformDeviceConfigurationChange
+static UInt32 gPendingRate;                        // a new nominal sample rate (0: none), applied there too
 static atomic_bool gPresent;                       // the QUAD-CAPTURE is connected
 static _Atomic float gVolumeScalar = 1.0f;
 static atomic_bool gMute;
@@ -196,6 +201,33 @@ static void loadStored(void) {
         CFRelease(stored);
     }
     updateGain();
+    stored = NULL;
+    if (gHost->CopyFromStorage(gHost, kQCRateStorageKey, &stored) == 0 && stored) {
+        SInt32 r = 0;
+        if (CFGetTypeID(stored) == CFNumberGetTypeID() && CFNumberGetValue(stored, kCFNumberSInt32Type, &r))
+            qc_engine_set_rate((uint32_t)r);   // ignored if the rate is not supported
+        CFRelease(stored);
+    }
+}
+
+static void saveRate(void) {
+    if (!gHost) return;
+    SInt32 r = (SInt32)qc_engine_get_rate();
+    CFNumberRef n = CFNumberCreate(NULL, kCFNumberSInt32Type, &r);
+    gHost->WriteToStorage(gHost, kQCRateStorageKey, n);
+    CFRelease(n);
+}
+
+// Ask the host for a configuration change to a new nominal sample rate.
+static OSStatus requestRate(Float64 rate) {
+    UInt32 r = (UInt32)llround(rate);
+    if (fabs(rate - r) > 0.5 || !qc_engine_rate_supported(r)) return kAudioDeviceUnsupportedFormatError;
+    if (r == qc_engine_get_rate()) return 0;
+    pthread_mutex_lock(&gStateLock);
+    gPendingRate = r;
+    pthread_mutex_unlock(&gStateLock);
+    if (gHost) gHost->RequestDeviceConfigurationChange(gHost, kObjectID_Device, 2, NULL);
+    return 0;
 }
 
 static void notify(AudioObjectID obj, AudioObjectPropertySelector sel1, AudioObjectPropertySelector sel2) {
@@ -389,13 +421,23 @@ static OSStatus QC_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef i
     (void)inChangeAction; (void)inChangeInfo;
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gStateLock);
-    if (gPendingConfig) {
-        // The engine can change its queue only while it does not run: stop, configure, start again.
+    if (gPendingConfig || gPendingRate) {
+        // The engine can change its queue and its rate only while it does not run: stop, configure,
+        // start again.
         bool running = qc_engine_is_running();
         if (running) qc_engine_stop();
-        applyConfigDictionary(gPendingConfig);
-        CFRelease(gPendingConfig);
-        gPendingConfig = NULL;
+        if (gPendingConfig) {
+            applyConfigDictionary(gPendingConfig);
+            CFRelease(gPendingConfig);
+            gPendingConfig = NULL;
+        }
+        if (gPendingRate) {
+            if (qc_engine_set_rate(gPendingRate)) {
+                os_log(gLog, "nominal sample rate: %u Hz", gPendingRate);
+                saveRate();
+            }
+            gPendingRate = 0;
+        }
         if (running && gIOClients > 0) {
             int rc = qc_engine_start();
             if (rc) os_log_error(gLog, "configuration change: the USB engine did not start again (%d)", rc);
@@ -411,6 +453,7 @@ static OSStatus QC_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inD
     if (inDriver != gDriverRef || inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gStateLock);
     if (gPendingConfig) { CFRelease(gPendingConfig); gPendingConfig = NULL; }
+    gPendingRate = 0;
     pthread_mutex_unlock(&gStateLock);
     return kAudioHardwareNoError;
 }
@@ -421,7 +464,7 @@ static AudioStreamBasicDescription streamFormat(AudioObjectID stream) {
     UInt32 ch = stream == kObjectID_Stream_Input ? QC_IN_CHANNELS : QC_OUT_CHANNELS;
     AudioStreamBasicDescription f;
     memset(&f, 0, sizeof(f));
-    f.mSampleRate = QC_SAMPLE_RATE;
+    f.mSampleRate = qc_engine_get_rate();
     f.mFormatID = kAudioFormatLinearPCM;
     f.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagsNativeEndian | kAudioFormatFlagIsPacked;
     f.mBytesPerPacket = 4 * ch;
@@ -504,7 +547,7 @@ static OSStatus propertySize(AudioObjectID obj, const AudioObjectPropertyAddress
         case kAudioDevicePropertyStreams: *size = deviceObjects(a->mScope, false, tmp) * sizeof(AudioObjectID); return 0;
         case kAudioObjectPropertyControlList: *size = 2 * sizeof(AudioObjectID); return 0;
         case kAudioDevicePropertyNominalSampleRate: *size = sizeof(Float64); return 0;
-        case kAudioDevicePropertyAvailableNominalSampleRates: *size = sizeof(AudioValueRange); return 0;
+        case kAudioDevicePropertyAvailableNominalSampleRates: *size = QC_NUM_RATES * sizeof(AudioValueRange); return 0;
         case kAudioDevicePropertyPreferredChannelsForStereo: *size = 2 * sizeof(UInt32); return 0;
         case kAudioDevicePropertyPreferredChannelLayout: *size = layoutSize(a->mScope); return 0;
         case kAudioObjectPropertyCustomPropertyInfoList: *size = 2 * sizeof(AudioServerPlugInCustomPropertyInfo); return 0;
@@ -527,7 +570,7 @@ static OSStatus propertySize(AudioObjectID obj, const AudioObjectPropertyAddress
         case kAudioStreamPropertyVirtualFormat:
         case kAudioStreamPropertyPhysicalFormat: *size = sizeof(AudioStreamBasicDescription); return 0;
         case kAudioStreamPropertyAvailableVirtualFormats:
-        case kAudioStreamPropertyAvailablePhysicalFormats: *size = sizeof(AudioStreamRangedDescription); return 0;
+        case kAudioStreamPropertyAvailablePhysicalFormats: *size = QC_NUM_RATES * sizeof(AudioStreamRangedDescription); return 0;
         }
         break;
     case kObjectID_Volume_Output:
@@ -582,7 +625,7 @@ static OSStatus QC_IsPropertySettable(AudioServerPlugInDriverRef inDriver, Audio
         *outIsSettable = sel == kAudioStreamPropertyIsActive || sel == kAudioStreamPropertyVirtualFormat ||
                          sel == kAudioStreamPropertyPhysicalFormat;
         break;
-    case kObjectID_Device: *outIsSettable = sel == kQCPropertyConfig; break;
+    case kObjectID_Device: *outIsSettable = sel == kQCPropertyConfig || sel == kAudioDevicePropertyNominalSampleRate; break;
     case kObjectID_Volume_Output:
         *outIsSettable = sel == kAudioLevelControlPropertyScalarValue || sel == kAudioLevelControlPropertyDecibelValue;
         break;
@@ -697,12 +740,13 @@ static OSStatus QC_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObj
             copyIDs(ids, 2, inDataSize, outDataSize, outData);
             return 0;
         }
-        case kAudioDevicePropertyNominalSampleRate: NEED(sizeof(Float64)); *(Float64 *)outData = QC_SAMPLE_RATE; return 0;
+        case kAudioDevicePropertyNominalSampleRate: NEED(sizeof(Float64)); *(Float64 *)outData = qc_engine_get_rate(); return 0;
         case kAudioDevicePropertyAvailableNominalSampleRates: {
-            if (inDataSize < sizeof(AudioValueRange)) { *outDataSize = 0; return 0; }
+            UInt32 n = inDataSize / sizeof(AudioValueRange);
+            if (n > QC_NUM_RATES) n = QC_NUM_RATES;
             AudioValueRange *v = outData;
-            v->mMinimum = v->mMaximum = QC_SAMPLE_RATE;
-            *outDataSize = sizeof(AudioValueRange);
+            for (UInt32 i = 0; i < n; i++) v[i].mMinimum = v[i].mMaximum = qc_engine_rates[i];
+            *outDataSize = n * sizeof(AudioValueRange);
             return 0;
         }
         case kAudioDevicePropertyPreferredChannelsForStereo: {
@@ -768,11 +812,15 @@ static OSStatus QC_GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObj
             return 0;
         case kAudioStreamPropertyAvailableVirtualFormats:
         case kAudioStreamPropertyAvailablePhysicalFormats: {
-            if (inDataSize < sizeof(AudioStreamRangedDescription)) { *outDataSize = 0; return 0; }
+            UInt32 n = inDataSize / sizeof(AudioStreamRangedDescription);
+            if (n > QC_NUM_RATES) n = QC_NUM_RATES;
             AudioStreamRangedDescription *d = outData;
-            d->mFormat = streamFormat(inObjectID);
-            d->mSampleRateRange.mMinimum = d->mSampleRateRange.mMaximum = QC_SAMPLE_RATE;
-            *outDataSize = sizeof(AudioStreamRangedDescription);
+            for (UInt32 i = 0; i < n; i++) {
+                d[i].mFormat = streamFormat(inObjectID);
+                d[i].mFormat.mSampleRate = qc_engine_rates[i];
+                d[i].mSampleRateRange.mMinimum = d[i].mSampleRateRange.mMaximum = qc_engine_rates[i];
+            }
+            *outDataSize = n * sizeof(AudioStreamRangedDescription);
             return 0;
         }
         }
@@ -847,6 +895,10 @@ static OSStatus QC_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObj
             }
             return 0;
         }
+        if (sel == kAudioDevicePropertyNominalSampleRate) {
+            if (inDataSize != sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
+            return requestRate(*(const Float64 *)inData);
+        }
         return kAudioHardwareUnknownPropertyError;
 
     case kObjectID_Stream_Input:
@@ -861,14 +913,13 @@ static OSStatus QC_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObj
         case kAudioStreamPropertyVirtualFormat:
         case kAudioStreamPropertyPhysicalFormat: {
             if (inDataSize != sizeof(AudioStreamBasicDescription)) return kAudioHardwareBadPropertySizeError;
-            // Only one format: accept it, refuse all others.
+            // One format at each supported rate: a new rate changes the rate of the device.
             const AudioStreamBasicDescription *f = inData;
             AudioStreamBasicDescription ours = streamFormat(inObjectID);
             if (f->mFormatID != ours.mFormatID || f->mChannelsPerFrame != ours.mChannelsPerFrame ||
-                f->mBitsPerChannel != ours.mBitsPerChannel || f->mFormatFlags != ours.mFormatFlags ||
-                fabs(f->mSampleRate - ours.mSampleRate) > 0.5)
+                f->mBitsPerChannel != ours.mBitsPerChannel || f->mFormatFlags != ours.mFormatFlags)
                 return kAudioDeviceUnsupportedFormatError;
-            return 0;
+            return requestRate(f->mSampleRate);
         }
         }
         return kAudioHardwareUnknownPropertyError;

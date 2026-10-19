@@ -31,9 +31,43 @@ Sources: the descriptors (`build/qc_descriptors`) and the Linux `snd-usb-audio` 
 - Alternate settings 1, 2, 3 and 4 of interfaces 0 and 1 are 44.1, 48, 96 and 192 kHz. At 192 kHz
   the streams have 2 channels.
 - The endpoints have no sampling-frequency control. The Linux driver says that only 44.1 kHz
-  operates, because "some unknown vendor-specific mechanism" changes the sample rate.
+  operates, because "some unknown vendor-specific mechanism" changes the sample rate. That
+  mechanism is now known: see [Sample rate](#sample-rate).
 - The interval of the audio endpoints is 1 (every microframe). At 44.1 kHz a packet has 5 or 6
   frames (5.5125 on average).
+
+### Sample rate
+
+The audio endpoints have no sampling-frequency control. The device clock changes with a vendor
+request on endpoint 0. The alternate setting of the streams must then agree with the new rate.
+
+Source: a study of the binary of the last Roland driver for macOS (`RDUSB012FDev.kext`, version
+1.5.6, x86_64), for interoperability only. The project contains no Roland code. This section
+describes the behavior in our own words.
+
+| Step | Request | Data |
+|---|---|---|
+| Set the rate | `bmRequestType 0x40`, `bRequest 0x03`, `wValue 0x0008`, `wIndex 0`, 4 bytes OUT | `0x40`, then the rate in Hz, 24-bit little-endian (44100 Hz: `40 44 ac 00`) |
+| Read the rate | `bmRequestType 0xc0`, `bRequest 0x03`, `wValue 0x0001`, `wIndex 0`, 4 bytes IN | The rate in Hz, 24-bit little-endian, then a flag byte |
+
+- Flag byte: bit 0 is set while the change is not complete; bit 1 is set if an error occurred.
+- The Roland driver sends "set", then reads the rate each 200 ms (40 times at most, 8 s). It
+  stops when the rate is correct and bits 0 and 1 are clear.
+- The Roland driver changes the rate only while its streams are stopped. Before and after the
+  change, it reads a status message from the interrupt endpoint `0x82` (interface 3).
+- Status messages on `0x82` have 8 bytes. A message with byte 0 = `1` contains the current
+  rate in bytes 3 to 5 (24-bit little-endian). The other bytes are not known yet.
+- At 192 kHz the streams have 2 channels (alternate setting 4). At 96 kHz or less they have 4
+  playback and 6 capture channels.
+
+`build/qc_rate` reads the rate, and `build/qc_rate <hz>` changes it.
+
+### Control panel (SysEx)
+
+The Roland control panel (input mixer, compressor, AUTO-SENS) sends Roland System Exclusive
+messages. The Roland driver puts them in USB-MIDI event packets on the MIDI bulk endpoints of
+interface 2 with **cable number 1** (normal MIDI uses cable 0). The content of these messages
+(addresses and values) is not known yet.
 
 ### Channels
 
@@ -78,9 +112,14 @@ These results come from tests on a MacBook Pro M4 Pro with macOS 26.6 (19 Octobe
   failed. Only a power cycle (disconnect the USB cable for 5 seconds) made the device operate again.
   The engine never sends a request with 0 bytes: an empty capture packet gives a playback packet
   with the nominal size.
-- **48 and 96 kHz.** At alternate settings 2 and 3 the device sent empty capture packets for the
-  32 ms of the test. That test stopped early (0-byte problem above), so it does not prove that
-  these rates fail. A new test can hang the device.
+- **48 and 96 kHz before the rate command was known.** At alternate settings 2 and 3, with the
+  device clock at 44.1 kHz, the device sent empty capture packets. The device clock must agree
+  with the alternate setting.
+- **Rate change.** The device needs about 1 s (5 polls of 200 ms) to change its clock. The
+  first status read after the "set" request can still show the old rate (seen at 48 to 96 kHz).
+  The interrupt endpoint `0x82` sent no status message while the device was idle.
+- **192 kHz noise.** The input noise floor at 192 kHz is about -81 dBFS RMS (about -95 to
+  -100 dBFS at the other rates), probably because of the wider bandwidth.
 
 ## Engine design
 
@@ -135,3 +174,7 @@ These results come from tests on a MacBook Pro M4 Pro with macOS 26.6 (19 Octobe
 | Tone on OUT 1L / OUT 2R, -30 dBFS | Audible on the correct sides; no capture channel contains it (below -136 dBFS) |
 | Core Audio device, 5 s (`qc_hal_test`) | 431 IO cycles of 512 frames, 0 sample-time breaks, rate scalar 1.000000 to 1.000018 |
 | Callback lag, test process (`qc_engine_test`) | 95 % below 0.5 ms; some up to 90 ms |
+| Rate command, 44.1 -> 48 -> 96 -> 192 -> 44.1 kHz (`qc_rate`) | Each change complete in about 1 s |
+| Capture at each rate, 3 s (`qc_capture -a 2/3/4`) | 0 empty packets, 0 USB errors; 6, 12 and 24 frames per microframe |
+| Engine at each rate, 4 s (`qc_engine_test -r`) | 0 missing frames, 0 USB errors; measured 47999.08, 95998.41, 191997.05, 44099.64 Hz |
+| Core Audio at each rate, 3 s, and tone 5 s (`qc_hal_test -r`) | 0 sample-time breaks, 0 late or missing frames, 0 USB errors |

@@ -1,9 +1,12 @@
 // qc_engine: USB audio engine for the Roland QUAD-CAPTURE. See qc_engine.h.
 //
 // USB protocol (from the descriptors and the Linux snd-usb-audio driver):
-//   interface 0, alternate setting 1: playback, isochronous OUT endpoint 0x05, 4 ch
-//   interface 1, alternate setting 1: capture, isochronous IN endpoint 0x85, 6 ch (implicit feedback)
-//   44.1 kHz, 24-bit samples left-justified in 32-bit words.
+//   interface 0: playback, isochronous OUT endpoint 0x05, 4 ch
+//   interface 1: capture, isochronous IN endpoint 0x85, 6 ch (implicit feedback)
+//   alternate setting 1/2/3/4 = 44.1/48/96/192 kHz (2 ch at 192 kHz)
+//   24-bit samples left-justified in 32-bit words.
+// The device clock changes with a vendor request on endpoint 0 (docs/PROTOCOL.md, "Sample rate"),
+// only while the streams are stopped.
 // Device behavior found in tests (see README.md):
 //   - An abort of the transfers can mute the outputs, so the engine stops with a clean drain.
 //   - After a power cycle the device sends empty capture packets for about 0.5 s, and a playback
@@ -36,7 +39,6 @@
 
 #define QC_VID 0x0582
 #define QC_PID 0x012f
-#define QC_ALT 1
 #define FIFO_LEN 4096
 #define STABLE_MICROFRAMES 800  // 100 ms of non-empty capture packets
 #define RESYNC_ATTEMPTS 4       // a late request tries again with a lead of 2, 4, 8 and 16 ms (frames)
@@ -57,7 +59,10 @@ static _Atomic int gCbPriority, gCbPolicy;
 
 // Configuration (changed only while the engine does not run).
 static int gNumReq = 32, gTpr = 32;              // 128 ms queue of 4 ms requests
-static uint32_t gOutMargin = 88, gInMargin = 88;   // 2 ms each
+static uint32_t gOutMargin = 88, gInMargin = 88;   // 2 ms each (frames at 44.1 kHz)
+static uint32_t gRate = 44100;                     // Hz
+
+const uint32_t qc_engine_rates[QC_NUM_RATES] = {44100, 48000, 96000, 192000};
 static bool gDirectWrite = true;                   // the client writes playback into the queued requests
 static bool gDirectRead = true;                    // a real-time thread reads capture from the queued requests
 #define GUARD_MICROFRAMES 8                        // direct writes stop 1 ms before the transfer
@@ -289,10 +294,11 @@ static void recordLag(uint64_t endMicro, double *maxMs, uint64_t *hist) {
 // Publish the zero timestamps that fall inside, with the host time interpolated over the span.
 static void appendCapture(const int32_t *src, uint32_t frames, uint64_t microStart, uint32_t micros, bool shared) {
     if (frames == 0) return;
+    const int used = gInFmt.channels < QC_IN_CHANNELS ? gInFmt.channels : QC_IN_CHANNELS;   // 2 at 192 kHz
     for (uint32_t f = 0; f < frames; f++) {
         float *dst = &gInRing[((gS + f) & RING_MASK) * QC_IN_CHANNELS];
         for (int c = 0; c < QC_IN_CHANNELS; c++)
-            dst[c] = src ? (float)src[f * gInFmt.channels + c] * (1.0f / 2147483648.0f) : 0.0f;
+            dst[c] = src && c < used ? (float)src[f * gInFmt.channels + c] * (1.0f / 2147483648.0f) : 0.0f;
     }
     while (gNextZero < gS + frames) {
         double frac = (double)(gNextZero - gS) / frames;
@@ -526,7 +532,7 @@ static void fillOut(int slot) {
             if (T < 0) continue;
             float *r = &gOutRing[(T & RING_MASK) * QC_OUT_CHANNELS];
             for (int c = 0; c < QC_OUT_CHANNELS; c++) {
-                o[c] = floatToSample(r[c]);
+                if (c < gOutFmt.channels) o[c] = floatToSample(r[c]);
                 r[c] = 0.0f;   // a frame that the client does not write again plays as silence
             }
         }
@@ -807,17 +813,90 @@ void qc_engine_get_config(int *requests, int *microframes, uint32_t *outputMargi
     pthread_mutex_unlock(&gLock);
 }
 
+bool qc_engine_rate_supported(uint32_t rate) {
+    for (int i = 0; i < QC_NUM_RATES; i++)
+        if (qc_engine_rates[i] == rate) return true;
+    return false;
+}
+
+bool qc_engine_set_rate(uint32_t rate) {
+    if (!qc_engine_rate_supported(rate)) return false;
+    pthread_mutex_lock(&gLock);
+    bool ok = !atomic_load(&gRunning);
+    if (ok) gRate = rate;
+    pthread_mutex_unlock(&gLock);
+    return ok;
+}
+
+uint32_t qc_engine_get_rate(void) { return gRate; }
+
+// Alternate setting of the audio interfaces for a rate.
+static int altForRate(uint32_t rate) {
+    for (int i = 0; i < QC_NUM_RATES; i++)
+        if (qc_engine_rates[i] == rate) return i + 1;
+    return 1;
+}
+
+// A margin of the configuration (frames at 44.1 kHz) at the current rate.
+static uint32_t scaledMargin(uint32_t margin) { return (uint32_t)ceil((double)margin * gRate / 44100.0); }
+
 uint32_t qc_engine_output_lead_frames(void) {
-    if (gDirectWrite) return (uint32_t)ceil(GUARD_MICROFRAMES * QC_SAMPLE_RATE / 8000.0) + gOutMargin;
-    return (uint32_t)ceil(gNumReq * gTpr * QC_SAMPLE_RATE / 8000.0) + gOutMargin;
+    if (gDirectWrite) return (uint32_t)ceil(GUARD_MICROFRAMES * (double)gRate / 8000.0) + scaledMargin(gOutMargin);
+    return (uint32_t)ceil(gNumReq * gTpr * (double)gRate / 8000.0) + scaledMargin(gOutMargin);
 }
 
 uint32_t qc_engine_input_delay_frames(void) {
     if (gDirectRead) {
         const double micros = SCAN_DELAY_MICROFRAMES + 1 + SCAN_PERIOD_US / 125.0;
-        return (uint32_t)ceil(micros * QC_SAMPLE_RATE / 8000.0) + gInMargin;
+        return (uint32_t)ceil(micros * (double)gRate / 8000.0) + scaledMargin(gInMargin);
     }
-    return (uint32_t)ceil(gTpr * QC_SAMPLE_RATE / 8000.0) + gInMargin;
+    return (uint32_t)ceil(gTpr * (double)gRate / 8000.0) + scaledMargin(gInMargin);
+}
+
+// Read the clock of the device: the rate (Hz) and the flags (bit 0: change not complete, bit 1: error).
+static bool readDeviceRate(IOUSBHostDevice *dev, uint32_t *rate, uint8_t *flags) {
+    IOUSBDeviceRequest req = {.bmRequestType = 0xc0, .bRequest = 0x03, .wValue = 0x0001, .wIndex = 0, .wLength = 4};
+    NSMutableData *data = [NSMutableData dataWithLength:4];
+    NSUInteger done = 0;
+    NSError *err = nil;
+    if (![dev sendDeviceRequest:req data:data bytesTransferred:&done completionTimeout:1.0 error:&err] || done != 4) {
+        os_log_error(gLog, "cannot read the device rate: %{public}s", err ? err.localizedDescription.UTF8String : "short reply");
+        return false;
+    }
+    const uint8_t *b = data.bytes;
+    *rate = b[0] | (b[1] << 8) | (b[2] << 16);
+    *flags = b[3];
+    return true;
+}
+
+// Set the clock of the device, if it is not at `rate`. The streams must be stopped.
+// The device needs about 1 s; wait 8 s at most.
+static bool setDeviceRate(IOUSBHostDevice *dev, uint32_t rate) {
+    uint32_t cur;
+    uint8_t flags;
+    if (!readDeviceRate(dev, &cur, &flags)) return false;
+    if (cur == rate && !(flags & 0x03)) return true;
+    IOUSBDeviceRequest req = {.bmRequestType = 0x40, .bRequest = 0x03, .wValue = 0x0008, .wIndex = 0, .wLength = 4};
+    uint8_t b[4] = {0x40, rate & 0xff, (rate >> 8) & 0xff, (rate >> 16) & 0xff};
+    NSMutableData *data = [NSMutableData dataWithBytes:b length:4];
+    NSUInteger done = 0;
+    NSError *err = nil;
+    if (![dev sendDeviceRequest:req data:data bytesTransferred:&done completionTimeout:1.0 error:&err]) {
+        os_log_error(gLog, "cannot set the device rate: %{public}s", err.localizedDescription.UTF8String);
+        return false;
+    }
+    // The first status after the request can still show the old rate.
+    for (int i = 0; i < 40; i++) {
+        usleep(200000);
+        if (!readDeviceRate(dev, &cur, &flags)) return false;
+        if (flags & 0x02) { os_log_error(gLog, "the device reports an error for %u Hz", rate); return false; }
+        if (cur == rate && !(flags & 0x01)) {
+            os_log(gLog, "device clock changed to %u Hz in %d ms", rate, (i + 1) * 200);
+            return true;
+        }
+    }
+    os_log_error(gLog, "the device clock did not change to %u Hz in 8 s", rate);
+    return false;
 }
 
 bool qc_engine_device_present(void) {
@@ -854,17 +933,20 @@ int qc_engine_start(void) {
             os_log_error(gLog, "cannot open the device: %{public}s", err.localizedDescription.UTF8String);
             rc = -2; goto fail;
         }
+        const int alt = altForRate(gRate);
         const IOUSBConfigurationDescriptor *cd = [gDev configurationDescriptorWithIndex:0 error:&err];
-        if (!cd || !parseFormat(cd, 1, QC_ALT, &gInFmt) || !parseFormat(cd, 0, QC_ALT, &gOutFmt) ||
-            gInFmt.subframe != 4 || gOutFmt.subframe != 4 ||
-            gInFmt.channels < QC_IN_CHANNELS || gOutFmt.channels < QC_OUT_CHANNELS) {
-            os_log_error(gLog, "unexpected descriptors");
+        if (!cd || !parseFormat(cd, 1, alt, &gInFmt) || !parseFormat(cd, 0, alt, &gOutFmt) ||
+            gInFmt.subframe != 4 || gOutFmt.subframe != 4 || gInFmt.channels < 2 || gOutFmt.channels < 2 ||
+            gInFmt.rate != gRate || gOutFmt.rate != gRate) {
+            os_log_error(gLog, "unexpected descriptors for %u Hz", gRate);
             rc = -3; goto fail;
         }
         if (!gDev.configurationDescriptor && ![gDev configureWithValue:1 matchInterfaces:YES error:&err]) {
             os_log_error(gLog, "cannot set configuration 1: %{public}s", err.localizedDescription.UTF8String);
             rc = -3; goto fail;
         }
+        // The audio interfaces are at alternate setting 0 (no stream) here: set the device clock.
+        if (!setDeviceRate(gDev, gRate)) { rc = -10; goto fail; }
         io_service_t s0 = waitForInterface(0), s1 = waitForInterface(1);
         if (!s0 || !s1) { os_log_error(gLog, "audio interfaces did not appear"); rc = -4; goto fail; }
         // The device object is necessary only for the configuration: close it, so that other
@@ -881,7 +963,7 @@ int qc_engine_start(void) {
             os_log_error(gLog, "cannot open the interfaces: %{public}s", err.localizedDescription.UTF8String);
             rc = -4; goto fail;
         }
-        if (![gIfOut selectAlternateSetting:QC_ALT error:&err] || ![gIfIn selectAlternateSetting:QC_ALT error:&err]) {
+        if (![gIfOut selectAlternateSetting:alt error:&err] || ![gIfIn selectAlternateSetting:alt error:&err]) {
             os_log_error(gLog, "cannot select alternate setting: %{public}s", err.localizedDescription.UTF8String);
             rc = -5; goto fail;
         }
@@ -960,9 +1042,9 @@ int qc_engine_start(void) {
             atomic_store(&gRunning, false);
             rc = -8; goto fail;
         }
-        os_log(gLog, "engine started: %d requests x %d microframes; output lead %u, input delay %u frames; %{public}s clock; "
-                     "direct write %{public}s, direct read %{public}s",
-               gNumReq, gTpr, qc_engine_output_lead_frames(), qc_engine_input_delay_frames(),
+        os_log(gLog, "engine started: %u Hz; %d requests x %d microframes; output lead %u, input delay %u frames; "
+                     "%{public}s clock; direct write %{public}s, direct read %{public}s",
+               gRate, gNumReq, gTpr, qc_engine_output_lead_frames(), qc_engine_input_delay_frames(),
                gHasMicroAPI ? "microframe" : "frame (smoothed)", gDirectWrite ? "on" : "off", gDirectRead ? "on" : "off");
         pthread_mutex_unlock(&gLock);
         return 0;
@@ -1056,6 +1138,7 @@ void qc_engine_write_output(int64_t sampleTime, uint32_t frames, const float *sr
     const double nowMicro = (double)refMicro + ((double)mach_absolute_time() - (double)refHost) / gTicksPerMicro;
     const double limitMicro = nowMicro + GUARD_MICROFRAMES;
     const uint32_t ch = (uint32_t)gOutFmt.channels;
+    const uint32_t used = ch < QC_OUT_CHANNELS ? ch : QC_OUT_CHANNELS;   // 2 at 192 kHz
 
     // Work in chunks, with a flag for each frame that a queued request received.
     uint32_t done = 0;
@@ -1081,7 +1164,7 @@ void qc_engine_write_output(int64_t sampleTime, uint32_t frames, const float *sr
                 if ((double)(m->firstMicro + (uint64_t)tx) < limitMicro) { late++; continue; }
                 int32_t *o = (int32_t *)(m->base + (size_t)rel * ch * 4);
                 const float *v = src + (size_t)(t - sampleTime) * QC_OUT_CHANNELS;
-                for (int c = 0; c < QC_OUT_CHANNELS; c++) o[c] = floatToSample(v[c]);
+                for (uint32_t c = 0; c < used; c++) o[c] = floatToSample(v[c]);
                 direct++;
             }
             atomic_thread_fence(memory_order_seq_cst);

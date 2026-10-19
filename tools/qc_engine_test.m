@@ -3,7 +3,8 @@
 // output qc_engine_output_lead_frames() early, and reads the input qc_engine_input_delay_frames() late.
 //
 // Usage: qc_engine_test [-s seconds] [-T] [-o output_dir] [-n requests] [-t microframes]
-//                       [-m output_margin_frames] [-i input_margin_frames]
+//                       [-m output_margin_frames] [-i input_margin_frames] [-r rate]
+//   -r sets the sample rate: 44100 (default), 48000, 96000 or 192000 Hz.
 //   -T plays the test tone: 440 Hz left (0.3-2.3 s), then 660 Hz right (2.7-4.7 s), -30 dBFS.
 #import <Foundation/Foundation.h>
 #include <mach/mach_time.h>
@@ -39,8 +40,12 @@ int main(int argc, char **argv) {
         NSString *outDir = [NSFileManager.defaultManager.currentDirectoryPath stringByAppendingPathComponent:@"recordings"];
         int ch, nReq = 0, tpr = 0;
         int outMargin = -1, inMargin = -1;
-        while ((ch = getopt(argc, argv, "s:To:n:t:m:i:d:")) != -1) {
+        while ((ch = getopt(argc, argv, "s:To:n:t:m:i:d:r:")) != -1) {
             if (ch == 'd') { qc_engine_set_direct(atoi(optarg)); continue; }
+            if (ch == 'r') {
+                if (!qc_engine_set_rate((uint32_t)atoi(optarg))) { fprintf(stderr, "unsupported rate\n"); return 2; }
+                continue;
+            }
             if (ch == 's') seconds = atof(optarg);
             else if (ch == 'T') tone = true;
             else if (ch == 'o') outDir = @(optarg);
@@ -48,17 +53,19 @@ int main(int argc, char **argv) {
             else if (ch == 't') tpr = atoi(optarg);
             else if (ch == 'm') outMargin = atoi(optarg);
             else if (ch == 'i') inMargin = atoi(optarg);
-            else { fprintf(stderr, "usage: qc_engine_test [-s seconds] [-T] [-o dir] [-n requests] [-t microframes] [-m out_margin] [-i in_margin]\n"); return 2; }
+            else { fprintf(stderr, "usage: qc_engine_test [-s seconds] [-T] [-o dir] [-n requests] [-t microframes] [-m out_margin] [-i in_margin] [-r rate]\n"); return 2; }
         }
         if (nReq || tpr || outMargin >= 0 || inMargin >= 0)
             qc_engine_configure(nReq ? nReq : 32, tpr ? tpr : 32, outMargin >= 0 ? outMargin : 88, inMargin >= 0 ? inMargin : 88);
+        const double rate = qc_engine_get_rate();
         const int64_t lead = qc_engine_output_lead_frames(), delay = qc_engine_input_delay_frames();
-        printf("Output lead %lld frames (%.1f ms), input delay %lld frames (%.1f ms)\n", lead, lead / 44.1, delay, delay / 44.1);
+        printf("%.0f Hz. Output lead %lld frames (%.1f ms), input delay %lld frames (%.1f ms)\n", rate, lead,
+               lead * 1000.0 / rate, delay, delay * 1000.0 / rate);
         if (tone && seconds < 5.0) seconds = 5.0;
 
         mach_timebase_info_data_t tb;
         mach_timebase_info(&tb);
-        const double ticksPerFrame = 1e9 / QC_SAMPLE_RATE * tb.denom / tb.numer;
+        const double ticksPerFrame = 1e9 / rate * tb.denom / tb.numer;
 
         uint64_t t0 = mach_absolute_time();
         int rc = qc_engine_start();
@@ -66,7 +73,7 @@ int main(int argc, char **argv) {
         if (rc) { fprintf(stderr, "qc_engine_start failed: %d (see: log show --last 1m --predicate 'subsystem == \"com.louistissot.quadcapture\"')\n", rc); return 1; }
         printf("Engine started in %.0f ms\n", startMs);
 
-        size_t capMax = (size_t)((seconds + 1) * QC_SAMPLE_RATE);
+        size_t capMax = (size_t)((seconds + 1) * rate);
         float *cap = calloc(capMax * QC_IN_CHANNELS, sizeof(float));
         size_t capFrames = 0;
         float buf[1024 * 4];
@@ -101,7 +108,7 @@ int main(int argc, char **argv) {
             while (b < 7 && lag >= edges[b]) b++;
             lagHist[b]++;
             if (ls.inputMissing != lastMissing) {
-                if (missEvents < 16) missAt[missEvents] = cur / QC_SAMPLE_RATE;
+                if (missEvents < 16) missAt[missEvents] = cur / rate;
                 missEvents++;
                 lastMissing = ls.inputMissing;
             }
@@ -112,7 +119,7 @@ int main(int argc, char **argv) {
             while (outPos < want) {
                 uint32_t n = (uint32_t)MIN(1024, want - outPos);
                 for (uint32_t i = 0; i < n; i++) {
-                    double t = (double)(outPos + i - outStart) / QC_SAMPLE_RATE;
+                    double t = (double)(outPos + i - outStart) / rate;
                     float l = 0, r = 0;
                     if (tone) {
                         const double amp = pow(10.0, -30.0 / 20.0), fade = 0.03;
@@ -182,8 +189,8 @@ int main(int argc, char **argv) {
         }
         [NSFileManager.defaultManager createDirectoryAtPath:outDir withIntermediateDirectories:YES attributes:nil error:nil];
         NSString *path = [outDir stringByAppendingPathComponent:@"engine-test-in1-2.wav"];
-        writeWav24(path.UTF8String, cap, capFrames, QC_IN_CHANNELS, (uint32_t)QC_SAMPLE_RATE);
-        printf("Wrote %s (%.2f s)\n", path.UTF8String, capFrames / QC_SAMPLE_RATE);
+        writeWav24(path.UTF8String, cap, capFrames, QC_IN_CHANNELS, (uint32_t)rate);
+        printf("Wrote %s (%.2f s)\n", path.UTF8String, capFrames / rate);
     }
     return 0;
 }

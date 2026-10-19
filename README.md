@@ -15,7 +15,8 @@ Macs with macOS 12 or earlier. With this driver, the QUAD-CAPTURE operates on Ap
   GarageBand, Reaper, System Settings, and others).
 - 4 inputs: IN 1, IN 2, DIGITAL IN L, DIGITAL IN R.
 - 4 outputs: OUT 1L, OUT 2R (also PHONES), DIGITAL OUT L, DIGITAL OUT R.
-- 44.1 kHz, 24-bit.
+- 44.1, 48, 96 and 192 kHz, 24-bit. Select the rate in Audio MIDI Setup or in your music app.
+  At 192 kHz the QUAD-CAPTURE has only 2 inputs and 2 outputs: DIGITAL IN and DIGITAL OUT are silent.
 - The audio clock comes from the QUAD-CAPTURE itself, so there is no drift.
 - Output volume and mute: the macOS volume keys operate.
 - Hot-plug: the device shows when you connect the QUAD-CAPTURE and goes away when you disconnect it.
@@ -37,8 +38,6 @@ If you use a Mac that is not in the table, please send a
 
 ### Known limits
 
-- **44.1 kHz only.** The QUAD-CAPTURE changes its sample rate with a Roland command that is not
-  known yet. See [Help wanted](#help-wanted).
 - **No Roland control panel.** The functions of the Roland control panel (input mixer, compressor,
   AUTO-SENS settings) are not available. The knobs and the switches on the QUAD-CAPTURE operate
   as usual.
@@ -122,10 +121,12 @@ test tools. To build the installer packages in `dist/`:
 ./packaging/make_pkg.sh
 ```
 
-To install a local build without a package:
+To install a local build without a package, remove the installed plug-in first. If `cp` writes
+over the old binary, macOS keeps the old code signature for that file and stops the driver
+helper ("Code Signature Invalid"):
 
 ```bash
-sudo cp -R build/QuadCapture.driver /Library/Audio/Plug-Ins/HAL/ && sudo killall coreaudiod
+sudo rm -rf /Library/Audio/Plug-Ins/HAL/QuadCapture.driver && sudo cp -R build/QuadCapture.driver /Library/Audio/Plug-Ins/HAL/ && sudo killall coreaudiod
 ```
 
 ### Test tools
@@ -136,6 +137,7 @@ sudo cp -R build/QuadCapture.driver /Library/Audio/Plug-Ins/HAL/ && sudo killall
 | `build/qc_engine_test [-T]` | Uses the USB engine directly, with no installed driver. |
 | `build/qc_capture [-T]` | Low-level USB recorder and tone test. |
 | `build/qc_descriptors` | Prints the USB descriptors. |
+| `build/qc_rate [hz]` | Reads the sample rate of the device, or changes it (44100, 48000, 96000, 192000). Use it only while no app uses the QUAD-CAPTURE. |
 
 CAUTION: Before you use `-T`, set the volume of your speakers and headphones low.
 
@@ -146,9 +148,6 @@ The test tools and an app cannot use the QUAD-CAPTURE at the same time.
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). These items need help:
 
 - **Compatibility reports** from other Macs and macOS versions.
-- **Sample rates 48, 96 and 192 kHz.** A USB capture of the official Roland driver (on Windows
-  with Wireshark and USBPcap, or on an Intel Mac with macOS 12 or earlier) while it changes the
-  sample rate would show the missing command.
 - **MIDI IN and MIDI OUT** (USB interface 2) as a CoreMIDI driver.
 - **The control panel protocol** (input mixer, compressor), also from a USB capture.
 - **An Apple Developer ID**, to sign and notarize the packages.

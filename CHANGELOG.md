@@ -1,5 +1,15 @@
 # Change log
 
+## Unreleased
+
+- Sample rates 48, 96 and 192 kHz (was 44.1 kHz only). Select the rate in Audio MIDI Setup or in
+  an app. The driver sets the clock of the QUAD-CAPTURE with a vendor request when the stream
+  starts (the change takes about 1 s). The driver keeps the selected rate after a restart.
+- At 192 kHz the device has 2 inputs and 2 outputs; the DIGITAL channels are silent.
+- The safety margins scale with the sample rate.
+- New tool `build/qc_rate` reads and changes the device rate. `qc_hal_test -r` and
+  `qc_engine_test -r` test a rate.
+
 ## 0.3.0 (beta)
 
 - Much lower latency. Safety offsets: output 3 ms (was 42 ms), input 3.4 ms (was 12 ms).

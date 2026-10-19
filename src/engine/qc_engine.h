@@ -1,4 +1,4 @@
-// qc_engine: USB audio engine for the Roland QUAD-CAPTURE (0582:012f), 44.1 kHz.
+// qc_engine: USB audio engine for the Roland QUAD-CAPTURE (0582:012f), 44.1, 48, 96 and 192 kHz.
 //
 // The engine streams capture and playback through IOUSBHost and exchanges audio with its client
 // through two ring buffers indexed by device sample time. Sample time 0 is the first capture
@@ -17,9 +17,10 @@
 extern "C" {
 #endif
 
-#define QC_SAMPLE_RATE 44100.0
+#define QC_SAMPLE_RATE 44100.0  // the default sample rate
 #define QC_IN_CHANNELS 4        // capture: INPUT 1, INPUT 2, DIGITAL IN L, DIGITAL IN R
 #define QC_OUT_CHANNELS 4       // playback: OUTPUT 1L, OUTPUT 2R, DIGITAL OUT L, DIGITAL OUT R
+                                // At 192 kHz the device has 2 channels: the DIGITAL channels are silent.
 #define QC_ZERO_PERIOD 16384    // frames between zero timestamps
 #define QC_RING_FRAMES 65536    // ring buffer size in frames (power of 2)
 #define QC_MAX_REQUESTS 32
@@ -66,6 +67,16 @@ void qc_engine_configure(int requests, int microframes, uint32_t outputMarginFra
 void qc_engine_get_config(int *requests, int *microframes, uint32_t *outputMarginFrames, uint32_t *inputMarginFrames,
                           int *direct);
 
+// Sample rate: 44100, 48000, 96000 or 192000 Hz. qc_engine_set_rate returns false for other
+// values or while the engine runs. qc_engine_start sets the device clock to this rate (a vendor
+// request; the change takes about 1 s).
+#define QC_NUM_RATES 4
+extern const uint32_t qc_engine_rates[QC_NUM_RATES];
+bool qc_engine_rate_supported(uint32_t rate);
+bool qc_engine_set_rate(uint32_t rate);
+uint32_t qc_engine_get_rate(void);
+
+// The margins of qc_engine_configure are frames at 44.1 kHz. At other rates the engine scales them.
 uint32_t qc_engine_output_lead_frames(void);
 uint32_t qc_engine_input_delay_frames(void);
 

@@ -2,9 +2,10 @@
 // It records INPUT 1-2 and, with -T, plays the test tone: 440 Hz left (0.3-2.3 s), then 660 Hz right
 // (2.7-4.7 s), -30 dBFS. It reports IO cycles, sample time continuity, and input levels.
 //
-// Usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-b buffer_frames]
+// Usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-b buffer_frames] [-r rate]
 //                    [-c requests,microframes,outMargin,inMargin,direct] [-q]
 //   -b sets the IO buffer size of this client (frames), as an app does (for example 128).
+//   -r sets the nominal sample rate of the device (44100, 48000, 96000, 192000) before the test.
 //   -c sets the USB queue of the plug-in (custom property 'qcfg'); -q prints the plug-in configuration
 //   and statistics (custom property 'qsta') and stops.
 #include <CoreAudio/CoreAudio.h>
@@ -18,6 +19,8 @@
 #define DEVICE_UID "QuadCaptureMac:0582:012f"
 #define kQCPropertyConfig 'qcfg'
 #define kQCPropertyStats 'qsta'
+
+static double gRate = 44100.0;   // nominal sample rate of the device
 
 static void printValue(CFTypeRef v) {
     if (CFGetTypeID(v) == CFNumberGetTypeID()) {
@@ -159,7 +162,7 @@ static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const Audio
         if (c->outStart < 0) c->outStart = outTime->mSampleTime;
         float *dst = b->mData;
         for (UInt32 i = 0; i < frames; i++) {
-            double t = (outTime->mSampleTime + i - c->outStart) / 44100.0;
+            double t = (outTime->mSampleTime + i - c->outStart) / gRate;
             for (UInt32 k = 0; k < ch; k++) dst[i * ch + k] = (c->tone && k < 2) ? toneSample(t, (int)k) : 0.0f;
         }
     }
@@ -183,14 +186,16 @@ int main(int argc, char **argv) {
     int opt, queryOnly = 0;
     UInt32 bufferFrames = 0;
     const char *config = NULL;
-    while ((opt = getopt(argc, argv, "s:To:c:qb:")) != -1) {
+    double newRate = 0;
+    while ((opt = getopt(argc, argv, "s:To:c:qb:r:")) != -1) {
         if (opt == 'b') { bufferFrames = (UInt32)atoi(optarg); continue; }
+        if (opt == 'r') { newRate = atof(optarg); continue; }
         if (opt == 's') seconds = atof(optarg);
         else if (opt == 'T') tone = 1;
         else if (opt == 'o') outPath = optarg;
         else if (opt == 'c') config = optarg;
         else if (opt == 'q') queryOnly = 1;
-        else { fprintf(stderr, "usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-b frames] [-c r,m,out,in,direct] [-q]\n"); return 2; }
+        else { fprintf(stderr, "usage: qc_hal_test [-s seconds] [-T] [-o output.wav] [-b frames] [-r rate] [-c r,m,out,in,direct] [-q]\n"); return 2; }
     }
     if (tone && seconds < 5.0) seconds = 5.0;
 
@@ -205,6 +210,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (config && setConfig(dev, config)) return 1;
+    AudioObjectPropertyAddress ra = {kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal,
+                                     kAudioObjectPropertyElementMain};
+    if (newRate > 0) {
+        r = AudioObjectSetPropertyData(dev, &ra, 0, NULL, sizeof(newRate), &newRate);
+        if (r) { fprintf(stderr, "setting the sample rate failed: %d\n", (int)r); return 1; }
+        for (int i = 0; i < 50; i++) {   // the change is asynchronous: wait until the device reports it
+            sz = sizeof(gRate);
+            AudioObjectGetPropertyData(dev, &ra, 0, NULL, &sz, &gRate);
+            if (fabs(gRate - newRate) < 0.5) break;
+            usleep(100000);
+        }
+    }
+    sz = sizeof(gRate);
+    AudioObjectGetPropertyData(dev, &ra, 0, NULL, &sz, &gRate);
     if (queryOnly) {
         printProperty(dev, kQCPropertyConfig, "Configuration");
         printProperty(dev, kQCPropertyStats, "Statistics");
@@ -216,7 +235,7 @@ int main(int argc, char **argv) {
         OSStatus br = AudioObjectSetPropertyData(dev, &b, 0, NULL, sizeof(bufferFrames), &bufferFrames);
         if (br) fprintf(stderr, "setting the buffer size failed: %d\n", (int)br);
     }
-    printf("Device %u: buffer %u frames; safety offset in/out %u/%u; latency in/out %u/%u\n", dev,
+    printf("Device %u: %.0f Hz; buffer %u frames; safety offset in/out %u/%u; latency in/out %u/%u\n", dev, gRate,
            getU32(dev, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal),
            getU32(dev, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeInput),
            getU32(dev, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput),
@@ -224,7 +243,7 @@ int main(int argc, char **argv) {
            getU32(dev, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput));
 
     Ctx c = {0};
-    c.capMax = (size_t)((seconds + 1) * 44100);
+    c.capMax = (size_t)((seconds + 1) * gRate);
     c.cap = calloc(c.capMax * 2, sizeof(float));
     c.nextIn = c.nextOut = c.outStart = -1;
     c.rateMin = 1e9;
@@ -243,7 +262,7 @@ int main(int argc, char **argv) {
 
     size_t frames = atomic_load(&c.capFrames);
     printf("IO cycles: %llu (%u frames each); input frames %zu (%.2f s); sample time breaks in/out: %llu/%llu\n",
-           atomic_load(&c.calls), c.lastFrames, frames, frames / 44100.0, atomic_load(&c.inDiscont),
+           atomic_load(&c.calls), c.lastFrames, frames, frames / gRate, atomic_load(&c.inDiscont),
            atomic_load(&c.outDiscont));
     if (c.rateMax > 0) printf("Rate scalar: %.6f .. %.6f\n", c.rateMin, c.rateMax);
     for (int ch = 0; ch < 2; ch++) {
@@ -261,7 +280,7 @@ int main(int argc, char **argv) {
     if (f) {
         uint32_t bytes = (uint32_t)(frames * 2 * 3);
         fwrite("RIFF", 1, 4, f); put32(f, 36 + bytes); fwrite("WAVEfmt ", 1, 8, f);
-        put32(f, 16); put16(f, 1); put16(f, 2); put32(f, 44100); put32(f, 44100 * 6); put16(f, 6); put16(f, 24);
+        put32(f, 16); put16(f, 1); put16(f, 2); put32(f, (uint32_t)gRate); put32(f, (uint32_t)gRate * 6); put16(f, 6); put16(f, 24);
         fwrite("data", 1, 4, f); put32(f, bytes);
         for (size_t i = 0; i < frames * 2; i++) {
             float v = c.cap[i] > 1 ? 1 : (c.cap[i] < -1 ? -1 : c.cap[i]);

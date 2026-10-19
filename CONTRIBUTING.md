@@ -32,8 +32,9 @@ Tests with the hardware:
 
 1. `build/qc_engine_test -s 30` uses the USB engine directly. It must report 0 missing frames,
    0 late frames and 0 USB errors.
-2. Install your build (`sudo cp -R build/QuadCapture.driver /Library/Audio/Plug-Ins/HAL/ && sudo
-   killall coreaudiod`).
+2. Install your build. Remove the installed plug-in first, so that the copy is a new file:
+   `sudo rm -rf /Library/Audio/Plug-Ins/HAL/QuadCapture.driver && sudo cp -R build/QuadCapture.driver
+   /Library/Audio/Plug-Ins/HAL/ && sudo killall coreaudiod`.
 3. `build/qc_hal_test -s 60` uses the device through Core Audio. It must report 0 sample-time
    breaks. `build/qc_hal_test -q` prints the driver statistics.
 4. CAUTION: Set the volume of your speakers and headphones low before the next step.
