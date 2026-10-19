@@ -1,4 +1,5 @@
 #!/bin/sh
-# Remove an earlier version, so that no old file stays in the plug-in bundle.
+# Remove an earlier version, so that no old file stays in the plug-in bundles.
 rm -rf "/Library/Audio/Plug-Ins/HAL/QuadCapture.driver"
+rm -rf "/Library/Audio/MIDI Drivers/QuadCaptureMIDI.plugin"
 exit 0

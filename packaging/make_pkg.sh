@@ -14,15 +14,20 @@ VERSION=$(cat VERSION)
 
 WORK=build/pkg
 rm -rf $WORK
-mkdir -p $WORK/root/Library/Audio/Plug-Ins/HAL $WORK/resources dist
+mkdir -p $WORK/root/Library/Audio/Plug-Ins/HAL "$WORK/root/Library/Audio/MIDI Drivers" $WORK/resources dist
 ditto build/QuadCapture.driver $WORK/root/Library/Audio/Plug-Ins/HAL/QuadCapture.driver
+ditto build/QuadCaptureMIDI.plugin "$WORK/root/Library/Audio/MIDI Drivers/QuadCaptureMIDI.plugin"
 cp packaging/resources/*.html $WORK/resources/
 cp LICENSE $WORK/resources/LICENSE.txt
 
-# The plug-in must go to /Library/Audio/Plug-Ins/HAL, also if another copy of the bundle exists.
+# The bundles must go to their system folders, also if another copy of a bundle exists.
 pkgbuild --analyze --root $WORK/root $WORK/component.plist >/dev/null
-n=$(plutil -extract . raw -o - $WORK/component.plist 2>/dev/null || echo 1)
-for ((i = 0; i < n; i++)); do plutil -replace $i.BundleIsRelocatable -bool NO $WORK/component.plist; done
+i=0
+while /usr/libexec/PlistBuddy -c "Print :$i:RootRelativeBundlePath" $WORK/component.plist >/dev/null 2>&1; do
+    /usr/libexec/PlistBuddy -c "Delete :$i:BundleIsRelocatable" $WORK/component.plist >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" $WORK/component.plist
+    i=$((i + 1))
+done
 
 pkgbuild --root $WORK/root --component-plist $WORK/component.plist \
     --identifier com.louistissot.quadcapture.driver --version $VERSION \

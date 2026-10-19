@@ -1,5 +1,6 @@
 #!/bin/sh
-# Restart the Core Audio service, so that it loads the new plug-in.
+# Restart the Core Audio service and the MIDI service, so that they load the new drivers.
 # Audio on the Mac stops for a few seconds.
 /usr/bin/killall coreaudiod 2>/dev/null
+/usr/bin/killall MIDIServer 2>/dev/null
 exit 0

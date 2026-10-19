@@ -1,0 +1,96 @@
+// qc_midi_codec_test: offline test of the USB-MIDI encoder and decoder (src/midi/qc_usbmidi.c).
+#include <stdio.h>
+#include <string.h>
+#include "midi/qc_usbmidi.h"
+
+static int failures;
+
+static void check(const char *name, const uint8_t *in, size_t n, const uint8_t *expect, size_t expectLen) {
+    QCMidiEncoder e;
+    qc_midi_encoder_reset(&e);
+    uint8_t out[256];
+    size_t len = qc_midi_encode(&e, 0, in, n, out, sizeof(out));
+    bool ok = len == expectLen && memcmp(out, expect, len) == 0;
+    printf("%-34s %s\n", name, ok ? "ok" : "FAIL");
+    if (!ok) {
+        failures++;
+        printf("   got:   ");
+        for (size_t i = 0; i < len; i++) printf("%02X%s", out[i], (i % 4 == 3) ? " | " : " ");
+        printf("\n   want:  ");
+        for (size_t i = 0; i < expectLen; i++) printf("%02X%s", expect[i], (i % 4 == 3) ? " | " : " ");
+        printf("\n");
+    }
+}
+
+#define B(...) (const uint8_t[]){__VA_ARGS__}
+#define CHECK(name, in, out) check(name, in, sizeof(in), out, sizeof(out))
+
+int main(void) {
+    CHECK("note on, note off", B(0x90, 0x3C, 0x64, 0x80, 0x3C, 0x00),
+          B(0x09, 0x90, 0x3C, 0x64, 0x08, 0x80, 0x3C, 0x00));
+    CHECK("running status", B(0x90, 0x3C, 0x64, 0x3E, 0x64),
+          B(0x09, 0x90, 0x3C, 0x64, 0x09, 0x90, 0x3E, 0x64));
+    CHECK("program change", B(0xC0, 0x05), B(0x0C, 0xC0, 0x05, 0x00));
+    CHECK("channel pressure, running", B(0xD3, 0x10, 0x20), B(0x0D, 0xD3, 0x10, 0x00, 0x0D, 0xD3, 0x20, 0x00));
+    CHECK("pitch bend", B(0xE0, 0x00, 0x40), B(0x0E, 0xE0, 0x00, 0x40));
+    CHECK("control change", B(0xB1, 0x07, 0x7F), B(0x0B, 0xB1, 0x07, 0x7F));
+    CHECK("sysex 2 bytes", B(0xF0, 0xF7), B(0x06, 0xF0, 0xF7, 0x00));
+    CHECK("sysex 3 bytes", B(0xF0, 0x7E, 0xF7), B(0x07, 0xF0, 0x7E, 0xF7));
+    CHECK("sysex 4 bytes", B(0xF0, 0x41, 0x10, 0xF7), B(0x04, 0xF0, 0x41, 0x10, 0x05, 0xF7, 0x00, 0x00));
+    CHECK("sysex 5 bytes", B(0xF0, 0x41, 0x10, 0x42, 0xF7), B(0x04, 0xF0, 0x41, 0x10, 0x06, 0x42, 0xF7, 0x00));
+    CHECK("sysex 6 bytes", B(0xF0, 0x41, 0x10, 0x42, 0x12, 0xF7),
+          B(0x04, 0xF0, 0x41, 0x10, 0x07, 0x42, 0x12, 0xF7));
+    CHECK("sysex 7 bytes", B(0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0xF7),
+          B(0x04, 0xF0, 0x41, 0x10, 0x04, 0x42, 0x12, 0x40, 0x05, 0xF7, 0x00, 0x00));
+    CHECK("real-time inside sysex", B(0xF0, 0x41, 0xF8, 0x10, 0x42, 0xF7),
+          B(0x0F, 0xF8, 0x00, 0x00, 0x04, 0xF0, 0x41, 0x10, 0x06, 0x42, 0xF7, 0x00));
+    CHECK("real-time between data", B(0x90, 0x3C, 0xFE, 0x64), B(0x0F, 0xFE, 0x00, 0x00, 0x09, 0x90, 0x3C, 0x64));
+    CHECK("song position", B(0xF2, 0x00, 0x08), B(0x03, 0xF2, 0x00, 0x08));
+    CHECK("MTC quarter frame", B(0xF1, 0x20), B(0x02, 0xF1, 0x20, 0x00));
+    CHECK("song select", B(0xF3, 0x05), B(0x02, 0xF3, 0x05, 0x00));
+    CHECK("tune request", B(0xF6), B(0x05, 0xF6, 0x00, 0x00));
+    CHECK("system common clears running", B(0x90, 0x3C, 0x64, 0xF6, 0x3E, 0x64),
+          B(0x09, 0x90, 0x3C, 0x64, 0x05, 0xF6, 0x00, 0x00));
+    check("stray data byte (no output)", B(0x3C, 0x64), 2, B(0), 0);
+
+    // A message split across two calls.
+    {
+        QCMidiEncoder e;
+        qc_midi_encoder_reset(&e);
+        uint8_t out[16];
+        size_t a = qc_midi_encode(&e, 0, B(0x90, 0x3C), 2, out, sizeof(out));
+        size_t b = qc_midi_encode(&e, 0, B(0x64), 1, out, sizeof(out));
+        bool ok = a == 0 && b == 4 && out[0] == 0x09 && out[1] == 0x90 && out[2] == 0x3C && out[3] == 0x64;
+        printf("%-34s %s\n", "split across calls", ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+    }
+    // Cable number in the high nibble.
+    {
+        QCMidiEncoder e;
+        qc_midi_encoder_reset(&e);
+        uint8_t out[8];
+        size_t a = qc_midi_encode(&e, 1, B(0xC0, 0x05), 2, out, sizeof(out));
+        bool ok = a == 4 && out[0] == 0x1C;
+        printf("%-34s %s\n", "cable number", ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+    }
+    // Decode: all code index numbers.
+    {
+        static const struct { uint8_t p[4]; int n; } t[] = {
+            {{0x09, 0x90, 0x3C, 0x64}, 3}, {{0x0C, 0xC0, 0x05, 0x00}, 2}, {{0x0F, 0xF8, 0, 0}, 1},
+            {{0x04, 0xF0, 0x41, 0x10}, 3}, {{0x05, 0xF7, 0, 0}, 1},       {{0x06, 0x42, 0xF7, 0}, 2},
+            {{0x07, 0x42, 0x12, 0xF7}, 3}, {{0x02, 0xF1, 0x20, 0}, 2},    {{0x03, 0xF2, 0x00, 0x08}, 3},
+            {{0x00, 0x00, 0x00, 0x00}, 0}, {{0x01, 0x01, 0x02, 0x03}, 0},
+        };
+        bool ok = true;
+        for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+            uint8_t bytes[3];
+            int n = qc_midi_decode(t[i].p, bytes);
+            if (n != t[i].n || memcmp(bytes, t[i].p + 1, (size_t)n) != 0) ok = false;
+        }
+        printf("%-34s %s\n", "decode all code index numbers", ok ? "ok" : "FAIL");
+        if (!ok) failures++;
+    }
+    printf("%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);
+    return failures ? 1 : 0;
+}
