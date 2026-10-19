@@ -30,6 +30,9 @@ for A in arm64 x86_64; do
 done
 lipo -create -output "$APP/Contents/MacOS/QuadCapturePanel" $TMP/QuadCapturePanel-arm64 $TMP/QuadCapturePanel-x86_64
 sed "s/@VERSION@/$VERSION/g" src/panel/Info.plist > "$APP/Contents/Info.plist"
+# The icon: an original drawing (src/panel/make_icon.swift makes AppIcon.icns again).
+mkdir -p "$APP/Contents/Resources"
+cp src/panel/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 rm -rf $TMP
 
 if [[ -n "${SIGN_IDENTITY:-}" && "$SIGN_IDENTITY" != "-" ]]; then
