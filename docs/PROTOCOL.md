@@ -100,7 +100,7 @@ of 128: `checksum = (128 - (sum & 0x7F)) & 0x7F`. All data bytes are 7-bit value
 | `00 05 0c 09` | Release | 0 to 45: 10, 12, 15, 18, 20, 25 ... 100 (steps of 5), 110 ... 200 (steps of 10), 220 ... 500 ms (steps of 20) |
 | `00 05 0c 0a` | Threshold | 0 to 50 = -50 to 0 dB |
 | `00 05 0c 0b` | Ratio | 0 to 8 = 1:1.0, 1:1.2, 1:1.5, 1:2.0, 1:2.8, 1:4.0, 1:8.0, 1:16, 1:INF |
-| `00 05 0c 0c` | Gain (make-up) | 0 to 74 = -50 to +24 dB (text table of the app; not tested) |
+| `00 05 0c 0c` | Gain (make-up) | 0 to 74 = -50 to +24 dB (text table of the app; only 0 and +1 dB tested) |
 | `00 03 00 00` | Output select | value from the app (meaning not known yet) |
 | `00 02 00 04` | DIGITAL IN setting | value from the app (meaning not known yet) |
 | `00 02 01 00` | AUTO-SENS mode | value from the app |
@@ -174,10 +174,30 @@ bytes to the same address. The kext can also write the full block with one DT1 t
 - The MIDI driver ignores cable 1, so the control messages do not go to MIDI apps.
 - **DIRECT MONITOR, MIX, OUTPUT and PHONES** operate in the device. They do not change the state
   block and the device sends no message for them.
+- **The SENS knob of IN 2** sends `00 05 01 04`. Thus `c` is byte 2 of the address (IN 1:
+  `00 05 00 04`).
+- **The device sends each DT1 back.** After the device applies a DT1 from the host, it sends the
+  same message (same address, same data) on cable 1, about 20 to 140 ms later. This was seen for
+  the parameters `00 05 0c xx` and the mixer level `00 06 00 08` (INPUT 1). The panel app uses this echo
+  as flow control: it sends one DT1 at a time, and it sends the next one after the echo (or after
+  300 ms).
+- **Stereo link on** (`00 05 00 05` = 1): the device copies the compressor settings of IN 1 to
+  IN 2 and sends 7 DT1 messages, `00 05 01 06` to `00 05 01 0c`, with the new values of IN 2.
+  Stereo link off sends no copy.
+- **Gain** (`00 05 0c 0c`): the values `0x32` (0 dB) and `0x33` (+1 dB) were written, and the
+  state block showed them. The full range (0 to 74) is not tested yet.
+- **Mixer levels**: DT1 messages to `00 06 00 08` from about -50 dB to 0 dB were written. Each
+  echo and the next state block agreed with the values.
 
 `build/qc_sysex` sends the RQ1 and decodes the reply. `build/qc_sysex -m <seconds>` reads the
 state block each 300 ms and prints each change and each message from the device. `build/qc_sysex -w <address> <data...>`
 sends a DT1.
+
+`build/QuadCapture Panel.app` (`src/panel/`) is a control panel app that uses this protocol. It
+reads the state block at start and after each group of writes, follows the DT1 messages from the
+device, and never sends the "Initialize" address `00 00 00 02`. It gets interface 2 with the same
+notification, reads the interface at all times while it holds it, releases it when another process
+posts the notification, and closes it when the app quits.
 
 ### Channels
 

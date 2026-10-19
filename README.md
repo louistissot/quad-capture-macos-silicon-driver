@@ -15,6 +15,9 @@ Macs with macOS 12 or earlier. With this driver, the QUAD-CAPTURE operates on Ap
   GarageBand, Reaper, System Settings, and others).
 - 4 inputs: IN 1, IN 2, DIGITAL IN L, DIGITAL IN R.
 - 4 outputs: OUT 1L, OUT 2R (also PHONES), DIGITAL OUT L, DIGITAL OUT R.
+- MIDI IN and MIDI OUT: a CoreMIDI driver gives the MIDI ports of the QUAD-CAPTURE to all MIDI apps.
+- A control panel app for the settings of the preamps, the compressors and the monitor mixer
+  (see [Control panel](#control-panel)).
 - 44.1, 48, 96 and 192 kHz, 24-bit. Select the rate in Audio MIDI Setup or in your music app.
   At 192 kHz the QUAD-CAPTURE has only 2 inputs and 2 outputs: DIGITAL IN and DIGITAL OUT are silent.
 - The audio clock comes from the QUAD-CAPTURE itself, so there is no drift.
@@ -38,12 +41,11 @@ If you use a Mac that is not in the table, please send a
 
 ### Known limits
 
-- **No Roland control panel app.** The settings that only the Roland control panel changes
-  (compressor, LO-CUT, PHASE, monitor mixer levels) have no app yet. The protocol is known (see
-  [docs/PROTOCOL.md](docs/PROTOCOL.md)), and `build/qc_sysex` can read and change them. The knobs
-  and the buttons on the QUAD-CAPTURE (SENS, AUTO-SENS, DIRECT MONITOR, MIX, OUTPUT, PHONES)
-  operate as usual.
-- **No MIDI yet.** The MIDI IN and MIDI OUT ports are not available yet.
+- **The control panel app is not in the packages yet.** To use it, build it from source (see
+  [Control panel](#control-panel)). Some settings of the Roland control panel (output select,
+  DIGITAL IN setting, AUTO-SENS margin) are not in the app, because their values are not known yet.
+- **The control panel app and MIDI apps cannot run at the same time.** They use the same USB
+  interface of the QUAD-CAPTURE (interface 2).
 - **Unsigned packages.** The packages do not have an Apple Developer ID signature, so macOS shows
   a warning when you open them. See [Install](#install).
 
@@ -66,6 +68,29 @@ To hear your inputs with no delay, use the DIRECT MONITOR control on the QUAD-CA
 
 If the recorded level is low, turn the SENS knob of the input up, or press AUTO-SENS and play
 at your loudest level. With the SENS knobs at minimum, the preamp gain is 0 dB.
+
+## Control panel
+
+`QuadCapture Panel.app` replaces the Roland control panel app, which does not operate on Apple
+Silicon Macs. It shows and changes these settings of IN 1 and IN 2:
+
+- SENS (input gain), LO-CUT and PHASE.
+- The compressor: on/off, threshold, ratio, attack, release, gate and gain.
+- The stereo link of IN 1 and IN 2.
+- The monitor mixer levels in OUTPUT 1-2: INPUT 1, INPUT 2 and COAX.
+
+To get the app, build it from source (see [Build from source](#build-from-source)), then open
+`build/QuadCapture Panel.app`.
+
+CAUTION: The app sends each change to the QUAD-CAPTURE at once. The device keeps the settings
+after a power cycle.
+
+- The app follows the SENS knobs and AUTO-SENS on the QUAD-CAPTURE. The other knobs and buttons
+  (DIRECT MONITOR, MIX, OUTPUT, PHONES) operate in the device and do not show in the app.
+- If a MIDI app runs (for example a music app that uses MIDI), the app shows "Another process uses
+  the control channel". Quit the MIDI apps. The app connects again automatically.
+- If the app shows "The QUAD-CAPTURE does not answer", disconnect the USB cable for 5 seconds, then
+  connect it again.
 
 ## Uninstall
 
@@ -155,8 +180,8 @@ The test tools and an app cannot use the QUAD-CAPTURE at the same time.
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). These items need help:
 
 - **Compatibility reports** from other Macs and macOS versions.
-- **MIDI IN and MIDI OUT** (USB interface 2) as a CoreMIDI driver.
-- **The control panel protocol** (input mixer, compressor), also from a USB capture.
+- **The control panel protocol**: the values of output select, DIGITAL IN setting and AUTO-SENS
+  margin (see [docs/PROTOCOL.md](docs/PROTOCOL.md)), also from a USB capture.
 - **An Apple Developer ID**, to sign and notarize the packages.
 
 ## License
