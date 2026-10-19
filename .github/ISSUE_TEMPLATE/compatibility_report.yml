@@ -1,0 +1,49 @@
+name: Compatibility report
+description: Tell us if the driver operates on your Mac.
+title: "[Compatibility] <Mac model>, macOS <version>"
+labels: ["compatibility"]
+body:
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model and chip
+      description: Apple menu > About This Mac.
+      placeholder: "MacBook Air 2020, M1"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "macOS 14.6"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Driver version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: checkboxes
+    id: results
+    attributes:
+      label: What operates?
+      options:
+        - label: The QUAD-CAPTURE device shows in System Settings > Sound
+        - label: Playback (OUT 1L / OUT 2R / PHONES)
+        - label: Recording (IN 1 / IN 2)
+        - label: DIGITAL IN / DIGITAL OUT
+        - label: Volume and mute keys
+        - label: Disconnect and connect again (hot-plug)
+        - label: After sleep and wake
+  - type: input
+    id: apps
+    attributes:
+      label: Apps that you used
+      placeholder: "Logic Pro 11, Ableton Live 12"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Problems and notes
+      description: Clicks, dropouts, errors. Attach the driver log if there is a problem (see README, Troubleshooting).

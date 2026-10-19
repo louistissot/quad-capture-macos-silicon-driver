@@ -1,0 +1,5 @@
+#!/bin/sh
+# Restart the Core Audio service, so that it loads the new plug-in.
+# Audio on the Mac stops for a few seconds.
+/usr/bin/killall coreaudiod 2>/dev/null
+exit 0

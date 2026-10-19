@@ -1,0 +1,4 @@
+#!/bin/sh
+# Remove an earlier version, so that no old file stays in the plug-in bundle.
+rm -rf "/Library/Audio/Plug-Ins/HAL/QuadCapture.driver"
+exit 0

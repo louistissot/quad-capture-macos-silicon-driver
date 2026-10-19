@@ -1,0 +1,6 @@
+#!/bin/sh
+# Remove the QUAD-CAPTURE driver and restart the Core Audio service.
+rm -rf "/Library/Audio/Plug-Ins/HAL/QuadCapture.driver"
+/usr/sbin/pkgutil --forget com.louistissot.quadcapture.driver >/dev/null 2>&1
+/usr/bin/killall coreaudiod 2>/dev/null
+exit 0

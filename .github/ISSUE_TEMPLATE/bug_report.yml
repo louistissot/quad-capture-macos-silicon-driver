@@ -1,0 +1,31 @@
+name: Bug report
+description: Something does not operate correctly.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What did you do, what did you expect, and what occurred?
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Mac model, chip and macOS version
+      placeholder: "MacBook Pro 2024, M4 Pro, macOS 26.6"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Driver version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Driver log
+      description: "Output of: /usr/bin/log show --last 30m --predicate 'subsystem == \"com.louistissot.quadcapture\"'"
+      render: text

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Uninstall the QUAD-CAPTURE Driver</title>
+    <welcome file="uninstall-welcome.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="true" hostArchitectures="arm64,x86_64"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="uninstall"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="uninstall" visible="false">
+        <pkg-ref id="com.louistissot.quadcapture.uninstall"/>
+    </choice>
+    <pkg-ref id="com.louistissot.quadcapture.uninstall" version="@VERSION@" onConclusion="none">uninstall.pkg</pkg-ref>
+</installer-gui-script>

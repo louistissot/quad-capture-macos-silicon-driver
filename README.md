@@ -1,0 +1,164 @@
+# QuadCaptureMac: a macOS driver for the Roland QUAD-CAPTURE
+
+QuadCaptureMac is an open-source driver for the **Roland QUAD-CAPTURE (UA-55)** USB audio
+interface. Roland stopped the development of its driver: the last Roland driver supports only Intel
+Macs with macOS 12 or earlier. With this driver, the QUAD-CAPTURE operates on Apple Silicon Macs
+(M1 and later) and on Intel Macs with macOS 12 or later.
+
+> This project is not made, approved or supported by Roland Corporation. "Roland" and
+> "QUAD-CAPTURE" are trademarks of Roland Corporation. The project uses these names only to
+> identify the hardware that it supports.
+
+## Features
+
+- A Core Audio device with the name **QUAD-CAPTURE** in all apps (Logic Pro, Ableton Live,
+  GarageBand, Reaper, System Settings, and others).
+- 4 inputs: IN 1, IN 2, DIGITAL IN L, DIGITAL IN R.
+- 4 outputs: OUT 1L, OUT 2R (also PHONES), DIGITAL OUT L, DIGITAL OUT R.
+- 44.1 kHz, 24-bit.
+- The audio clock comes from the QUAD-CAPTURE itself, so there is no drift.
+- Output volume and mute: the macOS volume keys operate.
+- Hot-plug: the device shows when you connect the QUAD-CAPTURE and goes away when you disconnect it.
+- No kernel extension and no change to the macOS security settings. The driver is a standard
+  Core Audio plug-in that runs in user space.
+
+## Status
+
+Version 0.2.0 is a beta version.
+
+| Configuration | Status |
+|---|---|
+| MacBook Pro M4 Pro, macOS 26.6 | Tested by the author |
+| Other Apple Silicon Macs (M1, M2, M3, M5), macOS 12 to 26 | Expected to operate, not tested yet |
+| Intel Macs, macOS 12 or later | The build is universal, not tested yet |
+
+If you use a Mac that is not in the table, please send a
+[compatibility report](../../issues/new?template=compatibility_report.yml). It helps all users.
+
+### Known limits
+
+- **44.1 kHz only.** The QUAD-CAPTURE changes its sample rate with a Roland command that is not
+  known yet. See [Help wanted](#help-wanted).
+- **No Roland control panel.** The functions of the Roland control panel (input mixer, compressor,
+  AUTO-SENS settings) are not available. The knobs and the switches on the QUAD-CAPTURE operate
+  as usual.
+- **No MIDI yet.** The MIDI IN and MIDI OUT ports are not available yet.
+- **Unsigned packages.** The packages do not have an Apple Developer ID signature, so macOS shows
+  a warning when you open them. See [Install](#install).
+
+## Install
+
+1. Download `QuadCapture-Driver-<version>.pkg` from the [Releases](../../releases) page.
+2. Open the package.
+3. If macOS shows "Apple could not verify ...", click **Done**. Then open System Settings >
+   Privacy & Security, scroll down, and click **Open Anyway** next to the package name.
+4. Follow the steps of the installer. You must type your Mac password.
+
+   CAUTION: At the end of the installation, the macOS audio service restarts. All audio on the
+   Mac stops for a few seconds.
+
+5. Connect the QUAD-CAPTURE with its USB cable. If macOS asks you to allow the accessory, click
+   **Allow**.
+6. In System Settings > Sound, or in your music app, select **QUAD-CAPTURE**.
+
+To hear your inputs with no delay, use the DIRECT MONITOR control on the QUAD-CAPTURE.
+
+## Uninstall
+
+Open `QuadCapture-Driver-Uninstaller-<version>.pkg` from the [Releases](../../releases) page.
+You can also use this command in Terminal:
+
+```bash
+sudo rm -rf /Library/Audio/Plug-Ins/HAL/QuadCapture.driver && sudo killall coreaudiod
+```
+
+## Troubleshooting
+
+| Problem | What to do |
+|---|---|
+| The QUAD-CAPTURE device is not in the list | Disconnect the USB cable, wait 5 seconds, and connect it again. Make sure that the driver is installed: `ls /Library/Audio/Plug-Ins/HAL/`. |
+| No sound | Turn the OUTPUT and PHONES knobs up. Make sure that the macOS volume of the device is not at 0 and not muted. |
+| The device does not operate after it stopped abruptly | Disconnect the USB cable for 5 seconds, then connect it again. The firmware of the QUAD-CAPTURE can stop when its stream stops abruptly. |
+
+To send a useful bug report, attach the driver log:
+
+```bash
+/usr/bin/log show --last 30m --predicate 'subsystem == "com.louistissot.quadcapture"'
+```
+
+## How it works
+
+```
+App ─> Core Audio (HAL) ─> QuadCapture.driver (AudioServerPlugIn)
+                              └─ qc_engine: IOUSBHost isochronous streams ─> USB ─> QUAD-CAPTURE
+```
+
+- The QUAD-CAPTURE is not "class compliant": its USB audio interfaces are vendor-specific, so
+  macOS does not recognize it. The format of its audio streams is close to USB Audio Class 1.
+  The Linux `snd-usb-audio` driver supports the device and documents its endpoints.
+- The plug-in (`src/driver/qc_driver.c`) publishes the Core Audio device. The USB engine
+  (`src/engine/qc_engine.m`) runs inside the plug-in. It sends and receives the isochronous USB
+  packets through the Apple IOUSBHost framework. It needs no kernel extension and no special
+  entitlement.
+- The size of each playback packet follows the size of a capture packet (implicit feedback).
+- The Core Audio clock (zero timestamps) comes from the capture packets, so it follows the clock
+  of the QUAD-CAPTURE.
+
+[docs/PROTOCOL.md](docs/PROTOCOL.md) gives the USB protocol, the behavior of the device firmware,
+and the design of the engine.
+
+## Build from source
+
+You need the Xcode Command Line Tools (`xcode-select --install`).
+
+```bash
+./build.sh
+```
+
+This builds `build/QuadCapture.driver` (universal: arm64 and x86_64, macOS 12 or later) and the
+test tools. To build the installer packages in `dist/`:
+
+```bash
+./packaging/make_pkg.sh
+```
+
+To install a local build without a package:
+
+```bash
+sudo cp -R build/QuadCapture.driver /Library/Audio/Plug-Ins/HAL/ && sudo killall coreaudiod
+```
+
+### Test tools
+
+| Tool | Use |
+|---|---|
+| `build/qc_hal_test [-T] [-q] [-c ...]` | Uses the installed device through Core Audio, as an app does. `-T` plays a test tone, `-q` prints the driver configuration and statistics, `-c` changes the USB queue. |
+| `build/qc_engine_test [-T]` | Uses the USB engine directly, with no installed driver. |
+| `build/qc_capture [-T]` | Low-level USB recorder and tone test. |
+| `build/qc_descriptors` | Prints the USB descriptors. |
+
+CAUTION: Before you use `-T`, set the volume of your speakers and headphones low.
+
+The test tools and an app cannot use the QUAD-CAPTURE at the same time.
+
+## Help wanted
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). These items need help:
+
+- **Compatibility reports** from other Macs and macOS versions.
+- **Sample rates 48, 96 and 192 kHz.** A USB capture of the official Roland driver (on Windows
+  with Wireshark and USBPcap, or on an Intel Mac with macOS 12 or earlier) while it changes the
+  sample rate would show the missing command.
+- **MIDI IN and MIDI OUT** (USB interface 2) as a CoreMIDI driver.
+- **The control panel protocol** (input mixer, compressor), also from a USB capture.
+- **An Apple Developer ID**, to sign and notarize the packages.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Acknowledgments
+
+- The developers of the Linux `snd-usb-audio` driver, whose quirk table documents the endpoints
+  of the QUAD-CAPTURE.
+- The Apple "NullAudio" sample driver, which shows the object model of an AudioServerPlugIn.
