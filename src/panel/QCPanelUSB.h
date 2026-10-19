@@ -32,6 +32,10 @@ typedef NS_ENUM(NSInteger, QCLinkState) {
 // Called on the main queue when a write fails.
 @property (nonatomic, copy, nullable) void (^onError)(NSString *text);
 
+// A SysEx message that the panel sends before it closes interface 2 by itself (at -stop, or when
+// another process asks for the interface), for example "level meter off". nil: no message.
+@property (atomic, copy, nullable) NSData *closeMessage;
+
 // Start: try to open interface 2 now, and again each 2 s while it is not open.
 - (void)start;
 // Try to open interface 2 now (the user clicked Retry).

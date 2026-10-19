@@ -43,9 +43,8 @@ If you use a Mac that is not in the table, please send a
 
 ### Known limits
 
-- **The control panel app is not in the packages yet.** To use it, build it from source (see
-  [Control panel](#control-panel)). Some settings of the Roland control panel (output select,
-  DIGITAL IN setting, AUTO-SENS margin) are not in the app, because their values are not known yet.
+- **Some settings of the Roland control panel are not in the app** (output select, DIGITAL IN
+  setting, AUTO-SENS margin), because their values are not known yet.
 - **The control panel app and MIDI apps cannot run at the same time.** They use the same USB
   interface of the QUAD-CAPTURE (interface 2).
 - **Unsigned packages.** The packages do not have an Apple Developer ID signature, so macOS shows
@@ -73,16 +72,21 @@ at your loudest level. With the SENS knobs at minimum, the preamp gain is 0 dB.
 
 ## Control panel
 
-`QuadCapture Panel.app` replaces the Roland control panel app, which does not operate on Apple
-Silicon Macs. It shows and changes these settings of IN 1 and IN 2:
+`QuadCapture Panel` (in the Applications folder) replaces the Roland control panel app, which does
+not operate on Apple Silicon Macs. It shows and changes these settings of IN 1 and IN 2:
 
-- SENS (input gain), LO-CUT and PHASE.
-- The compressor: on/off, threshold, ratio, attack, release, gate and gain.
+- SENS (input gain), LO-CUT, PHASE and AUTO-SENS.
+- The compressors: ON/BYPASS, threshold, ratio, attack, release, gate and gain, with a graph of
+  the compressor curve.
 - The stereo link of IN 1 and IN 2.
 - The monitor mixer levels in OUTPUT 1-2: INPUT 1, INPUT 2 and COAX.
+- The sample rate of the device (as in Audio MIDI Setup).
 
-To get the app, build it from source (see [Build from source](#build-from-source)), then open
-`build/QuadCapture Panel.app`.
+It also shows level meters for IN 1, IN 2, COAX IN and OUTPUT. The QUAD-CAPTURE sends the meter
+data itself, so the meters need no audio stream and no microphone permission. They operate only
+while the window is visible.
+
+Turn a knob with the mouse: drag up or down. Double-click a knob to set its factory value.
 
 CAUTION: The app sends each change to the QUAD-CAPTURE at once. The device keeps the settings
 after a power cycle.
@@ -93,6 +97,18 @@ after a power cycle.
   the control channel". Quit the MIDI apps. The app connects again automatically.
 - If the app shows "The QUAD-CAPTURE does not answer", disconnect the USB cable for 5 seconds, then
   connect it again.
+
+### Web panel (optional)
+
+The app can also show the panel as a web page, for a phone or another computer on the same local
+network. The web panel is off until you turn it on (open "Web panel" at the bottom of the window).
+
+- The address contains a random key. Give it only to people who can change the settings of the
+  device. "New key" makes all old addresses stop.
+- The web panel accepts only connections from the local network.
+
+CAUTION: The connection is not encrypted (HTTP). Use the web panel only on a network that you
+trust, not on public Wi-Fi.
 
 ## Uninstall
 
@@ -171,7 +187,7 @@ sudo rm -rf /Library/Audio/Plug-Ins/HAL/QuadCapture.driver && sudo cp -R build/Q
 | `build/qc_capture [-T]` | Low-level USB recorder and tone test. |
 | `build/qc_descriptors` | Prints the USB descriptors. |
 | `build/qc_sysex [-m seconds]` | Reads the control-panel settings of the device (SENS, compressor, mixer), or watches their changes. `-w` changes a setting. |
-| `build/QuadCapture Panel.app` | The control panel app: SENS, LO-CUT, PHASE, compressor, stereo link and monitor mixer of IN 1 and IN 2. It replaces the Roland control panel. Changes go to the device at once, and the device keeps them after a power cycle. |
+| `build/QuadCapture Panel.app` | The control panel app (see [Control panel](#control-panel)). The packages install it in the Applications folder. |
 | `build/qc_rate [hz]` | Reads the sample rate of the device, or changes it (44100, 48000, 96000, 192000). Use it only while no app uses the QUAD-CAPTURE. |
 
 CAUTION: Before you use `-T`, set the volume of your speakers and headphones low.

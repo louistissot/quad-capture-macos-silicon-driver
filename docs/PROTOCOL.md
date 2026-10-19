@@ -105,8 +105,8 @@ of 128: `checksum = (128 - (sum & 0x7F)) & 0x7F`. All data bytes are 7-bit value
 | `00 02 00 04` | DIGITAL IN setting | value from the app (meaning not known yet) |
 | `00 02 01 00` | AUTO-SENS mode | value from the app |
 | `00 02 01 01` | AUTO-SENS margin | value from the app ("Margin [dB]") |
-| `00 02 01 02` | AUTO-SENS start/stop | value from the app |
-| `00 0a 00 00` | Level meter on/off | value from the app |
+| `00 02 01 02` | AUTO-SENS start/stop | 1 = a press of the AUTO-SENS button (start, or stop if it runs) |
+| `00 0a 00 00` | Level meter on/off | 1 on, 0 off (see [Level meter](#level-meter)) |
 | `00 00 00 02` | Initialize (the app sends 0 after "OK to initialize the current settings?") | not tested: it resets all settings |
 
 #### Monitor mixer (DT1, 6 data bytes)
@@ -198,6 +198,24 @@ reads the state block at start and after each group of writes, follows the DT1 m
 device, and never sends the "Initialize" address `00 00 00 02`. It gets interface 2 with the same
 notification, reads the interface at all times while it holds it, releases it when another process
 posts the notification, and closes it when the app quits.
+
+#### Level meter
+
+DT1 `00 0a 00 00` = 1 turns on the level meter of the device; 0 turns it off. While it is on, the
+device sends DT1 messages to `00 0a 00 01` with 16 data bytes, several times per second, on
+cable 1. The meter needs no audio stream. Tested on 19 October 2026:
+
+- The device sends the DT1 `00 0a 00 00` back, as for the other parameters.
+- The 16 bytes are 8 pairs. Pairs 1 to 6 are probably IN 1, IN 2, COAX L, COAX R, OUT L, OUT R.
+  Pairs 7 and 8 were always `7f 7f`.
+- Probable value: high byte x 128 + low byte, a linear amplitude with 16383 = full scale. Facts
+  that agree: the input noise was 2 to 3 (about -75 dBFS) with SENS at 25-27 dB; OUT was about
+  IN 1 + IN 2 (direct monitor at 0 dB); a short sound gave IN 1 = IN 2 = 0x15 and OUT = 0x29.
+  A calibrated test with a known level is not done yet.
+- Example (quiet): `00 03 00 02 00 00 00 00 00 05 04 09 7f 7f 7f 7f`.
+
+The panel turns the meter on only while its window is visible, and turns it off before it closes
+interface 2 (at quit, or when another process asks for the interface).
 
 ### Channels
 

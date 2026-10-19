@@ -64,10 +64,20 @@ enum Parameter: UInt8, CaseIterable {
     }
 
     static let linkAddress: [UInt8] = [0x00, 0x05, 0x00, 0x05]
+    // AUTO-SENS button: DT1 with the value 1. The device starts the measurement, or stops it if it
+    // runs. It then sends 00 02 01 02 = 0 and changes byte 21 of the state block.
+    static let autoSensAddress: [UInt8] = [0x00, 0x02, 0x01, 0x02]
+    // Level meter: DT1 with 1 (on) or 0 (off). While it is on, the device sends the levels as DT1
+    // messages to meterDataAddress (16 data bytes) several times per second. The meter needs no
+    // audio stream.
+    static let meterAddress: [UInt8] = [0x00, 0x0A, 0x00, 0x00]
+    static let meterDataAddress: [UInt8] = [0x00, 0x0A, 0x00, 0x01]
     static func mixerAddress(_ index: Int) -> [UInt8] { [0x00, 0x06, UInt8(index), 0x08] }
 
     static func isKnown(_ a: [UInt8], dataCount: Int) -> Bool {
         if a == linkAddress { return dataCount == 1 }
+        if a == autoSensAddress { return dataCount == 1 }
+        if a == meterAddress { return dataCount == 1 }
         if a[0] == 0x00, a[1] == 0x05, a[2] <= 1, Parameter(rawValue: a[3]) != nil { return dataCount == 1 }
         if a[0] == 0x00, a[1] == 0x06, a[2] <= 2, a[3] == 0x08 { return dataCount == 6 }
         return false
@@ -112,7 +122,8 @@ enum MixerLevel {
         raw <= 0 ? -.infinity : 20 * log10(Double(raw) / Double(unity))
     }
     static func raw(_ db: Double) -> Int {
-        if db < minimumDB { return 0 }
+        guard db.isFinite, db >= minimumDB else { return 0 }
+        if db >= 12 { return maximum }
         return min(maximum, Int((Double(unity) * pow(10, db / 20)).rounded()))
     }
     static func text(_ raw: Int) -> String {
@@ -123,6 +134,23 @@ enum MixerLevel {
     }
     static func value(_ n: ArraySlice<UInt8>) -> Int {
         n.reduce(0) { ($0 << 4) | Int($1 & 0x0F) }
+    }
+}
+
+// MARK: - Meter data
+
+enum MeterData {
+    // The 16 data bytes are 8 pairs; the panel uses the first 6: IN 1, IN 2, COAX L, COAX R, OUT L,
+    // OUT R. 7F 7F = no value. Probable scale: high x 128 + low = linear amplitude, 16383 = full
+    // scale (docs/PROTOCOL.md, "Level meter"; a calibrated test is not done yet).
+    static func decibels(_ d: [UInt8]) -> [Float?] {
+        guard d.count == 16 else { return [] }
+        return (0..<6).map { i in
+            let hi = d[2 * i], lo = d[2 * i + 1]
+            if hi == 0x7F && lo == 0x7F { return nil }
+            let v = Int(hi) << 7 | Int(lo)
+            return v == 0 ? -.infinity : Float(20 * log10(Double(v) / 16383))
+        }
     }
 }
 
@@ -139,6 +167,11 @@ final class PanelModel: ObservableObject {
     @Published var autoSens = 0                       // 0 off, 2 measurement, 1 complete
     @Published var lastError: String?
     @Published var log: [String] = []
+    @Published var metersWanted = true { didSet { updateMeter() } }
+    let meters = MeterModel()
+    private var windowVisible = true
+    private var meterOn = false            // the last value sent to the device
+    private var meterDataSeen = false
 
     private let usb = QCPanelUSB()
     private var pendingWrites: [[UInt8]: [UInt8]] = [:]   // address -> data; the last value wins
@@ -154,6 +187,8 @@ final class PanelModel: ObservableObject {
     init() {
         usb.onState = { [weak self] state, detail in self?.usbState(state, detail) }
         usb.onSysEx = { [weak self] data in self?.received([UInt8](data)) }
+        // When the panel closes the interface by itself, the device meter goes off.
+        usb.closeMessage = Data(SysEx.dataSet(Parameter.meterAddress, [0])!)
         usb.onError = { [weak self] text in
             self?.lastError = text
             self?.addLog("ERROR: \(text)")
@@ -180,6 +215,35 @@ final class PanelModel: ObservableObject {
         guard stereoLink != on else { return }
         stereoLink = on
         queueWrite(Parameter.linkAddress, [on ? 1 : 0])
+    }
+
+    // The AUTO-SENS button of the front panel.
+    func pressAutoSens() {
+        guard canEdit else { return }
+        // Always send it: the same value again is the next press.
+        pendingWrites[Parameter.autoSensAddress] = [1]
+        verifyWork?.cancel()
+        if flushScheduled || inFlight != nil { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.flushWrites() }
+    }
+
+    // The window is visible or not: the meter operates only while it is visible.
+    func setWindowVisible(_ v: Bool) {
+        windowVisible = v
+        updateMeter()
+    }
+
+    private func updateMeter() {
+        let want = metersWanted && windowVisible && canEdit
+        guard want != meterOn else { return }
+        meterOn = want
+        meterDataSeen = false
+        pendingWrites[Parameter.meterAddress] = [want ? 1 : 0]
+        if !want { meters.reset() }
+        if flushScheduled || inFlight != nil { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in self?.flushWrites() }
     }
 
     func setMixer(_ index: Int, _ raw: Int) {
@@ -263,6 +327,16 @@ final class PanelModel: ObservableObject {
             addLog("Received (not decoded): \(hex(m))")
             return
         }
+        if address == Parameter.meterDataAddress {   // several times per second: not in the log
+            if meterOn {
+                if !meterDataSeen {
+                    meterDataSeen = true
+                    addLog("Received meter data \(hex(data)) (this line only once after each \"meter on\")")
+                }
+                meters.note(MeterData.decibels(data))
+            }
+            return
+        }
         if address == SysEx.blockAddress, data.count == SysEx.blockSize {
             requestTimer?.invalidate()
             requestFailures = 0
@@ -321,6 +395,7 @@ final class PanelModel: ObservableObject {
         mixer = [MixerLevel.value(k[41..<47]), MixerLevel.value(k[47..<53]), MixerLevel.value(k[53..<59])]
         autoSens = Int(k[21])
         loaded = true
+        updateMeter()
         // While AUTO-SENS measures, read the block each second until the result is there.
         if autoSens == 2 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.requestBlock() }
@@ -341,6 +416,8 @@ final class PanelModel: ObservableObject {
         default: link = .noDevice
         }
         if state != .open {
+            meterOn = false   // the interface is closed: the panel sends the meter state again later
+            meters.reset()
             requestTimer?.invalidate()
             echoTimer?.invalidate()
             inFlight = nil

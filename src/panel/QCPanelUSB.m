@@ -175,18 +175,37 @@ static io_service_t findInterface(void) {
 - (void)otherProcessWantsInterface {
     if (!_iface || dispatch_time(DISPATCH_TIME_NOW, 0) < _ignoreNotifyUntil) return;
     _nextTry = dispatch_time(DISPATCH_TIME_NOW, (int64_t)RELEASED_WAIT_SECONDS * NSEC_PER_SEC);
+    [self sendCloseMessage];
     [self closeWithState:QCLinkStateReleased detail:@"another process asked for interface 2"];
 }
 
+// Send closeMessage synchronously (timeout 0.5 s), on _q, while the interface is open.
+- (void)sendCloseMessage {
+    NSData *msg = self.closeMessage;
+    if (!_iface || msg.length == 0 || msg.length > MAX_SYSEX) return;
+    uint8_t pk[MAX_SYSEX * 2];
+    QCMidiEncoder enc;
+    qc_midi_encoder_reset(&enc);
+    const size_t len = qc_midi_encode(&enc, CABLE, msg.bytes, msg.length, pk, sizeof(pk));
+    NSError *err = nil;
+    NSMutableData *d = [_iface ioDataWithCapacity:len error:&err];
+    if (!d) return;
+    memcpy(d.mutableBytes, pk, len);
+    NSUInteger done = 0;
+    [_outPipe sendIORequestWithData:d bytesTransferred:&done completionTimeout:0.5 error:&err];
+}
+
 - (void)stop {
+    // First let the queued writes go out (each has a timeout of 1 s), then send closeMessage, then close.
+    dispatch_sync(_q, ^{});
+    dispatch_sync(_writeQ, ^{});
     dispatch_sync(_q, ^{
         self->_stopped = true;
         if (self->_timer) { dispatch_source_cancel(self->_timer); self->_timer = nil; }
         if (self->_notifyToken != NOTIFY_TOKEN_INVALID) { notify_cancel(self->_notifyToken); self->_notifyToken = NOTIFY_TOKEN_INVALID; }
+        [self sendCloseMessage];
         [self closeWithState:QCLinkStateNoDevice detail:@"stopped"];
     });
-    // Let the writes that are in progress finish (each has a timeout of 1 s).
-    dispatch_sync(_writeQ, ^{});
 }
 
 #pragma mark Read

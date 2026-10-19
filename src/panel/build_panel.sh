@@ -22,9 +22,11 @@ for A in arm64 x86_64; do
     clang $C -c -o $TMP/qc_usbmidi-$A.o src/midi/qc_usbmidi.c
     swiftc -target $A-apple-macos$MINOS -sdk "$SDKPATH" -swift-version 5 -O -Isrc \
         -import-objc-header src/panel/QCPanel-Bridging.h -module-name QuadCapturePanel \
-        -o $TMP/QuadCapturePanel-$A src/panel/PanelModel.swift src/panel/PanelApp.swift \
+        -o $TMP/QuadCapturePanel-$A src/panel/PanelModel.swift src/panel/PanelApp.swift src/panel/AudioDevice.swift \
+        src/panel/Controls.swift src/panel/WebPanel.swift \
         $TMP/QCPanelUSB-$A.o $TMP/qc_usbmidi-$A.o \
-        -framework AppKit -framework SwiftUI -framework IOKit -framework IOUSBHost
+        -framework AppKit -framework SwiftUI -framework IOKit -framework IOUSBHost -framework CoreAudio \
+        -framework Network -framework CoreImage
 done
 lipo -create -output "$APP/Contents/MacOS/QuadCapturePanel" $TMP/QuadCapturePanel-arm64 $TMP/QuadCapturePanel-x86_64
 sed "s/@VERSION@/$VERSION/g" src/panel/Info.plist > "$APP/Contents/Info.plist"
@@ -33,6 +35,6 @@ rm -rf $TMP
 if [[ -n "${SIGN_IDENTITY:-}" && "$SIGN_IDENTITY" != "-" ]]; then
     codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp "$APP"   # for notarization
 else
-    codesign --force --sign - --timestamp=none "$APP"                               # ad-hoc signature
+    codesign --force --sign - --timestamp=none "$APP"   # ad-hoc signature
 fi
 echo "Built $APP $VERSION ($(lipo -archs "$APP/Contents/MacOS/QuadCapturePanel"), macOS $MINOS+)"

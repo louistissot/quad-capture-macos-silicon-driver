@@ -30,6 +30,8 @@
 	<string>public.app-category.music</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>The web panel lets a phone or another computer on your local network change the settings of the QUAD-CAPTURE. It operates only when you turn it on.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>
