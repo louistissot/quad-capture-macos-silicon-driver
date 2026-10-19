@@ -1144,6 +1144,31 @@ static void drainIterator(io_iterator_t it) {
     while ((o = IOIteratorNext(it))) IOObjectRelease(o);
 }
 
+// Set the USB configuration as soon as the device connects, as the Roland driver does: the device
+// then shows that it is ready (its lights change), and its interfaces exist for all clients.
+static void prepareDevice(void) {
+    @autoreleasepool {
+        pthread_mutex_lock(&gLock);
+        if (!atomic_load(&gRunning)) {
+            io_service_t svc = findDevice();
+            if (svc) {
+                NSError *err = nil;
+                IOUSBHostDevice *d = [[IOUSBHostDevice alloc] initWithIOService:svc options:IOUSBHostObjectInitOptionsNone
+                                                                          queue:nil error:&err interestHandler:nil];
+                IOObjectRelease(svc);
+                if (d) {
+                    if (!d.configurationDescriptor) {
+                        if ([d configureWithValue:1 matchInterfaces:YES error:&err]) os_log(gLog, "device configured");
+                        else os_log_error(gLog, "cannot configure the device: %{public}s", err.localizedDescription.UTF8String);
+                    }
+                    [d destroy];
+                }
+            }
+        }
+        pthread_mutex_unlock(&gLock);
+    }
+}
+
 static void presenceChanged(void *refcon, io_iterator_t it) {
     (void)refcon;
     drainIterator(it);
@@ -1151,6 +1176,7 @@ static void presenceChanged(void *refcon, io_iterator_t it) {
     if (present == gLastPresent) return;
     gLastPresent = present;
     if (gLog) os_log(gLog, "QUAD-CAPTURE %{public}s", present ? "connected" : "disconnected");
+    if (present) prepareDevice();
     if (gPresenceCallback) gPresenceCallback(present);
 }
 
@@ -1171,6 +1197,7 @@ void qc_engine_watch_device(QCPresenceCallback callback) {
         drainIterator(gArriveIter);
         drainIterator(gLeaveIter);
         gLastPresent = qc_engine_device_present();
+        if (gLastPresent) prepareDevice();
         if (gPresenceCallback) gPresenceCallback(gLastPresent);
     });
 }

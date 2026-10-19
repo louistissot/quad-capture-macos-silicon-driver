@@ -11,6 +11,8 @@
     deep: a callback can be up to 128 ms late with no dropout (a 126 ms delay occurred in tests
     during heavy system activity).
 - The start waits until all queued playback requests can take direct writes (no silent start).
+- The driver sets the USB configuration as soon as the QUAD-CAPTURE connects (and when the audio
+  service starts), as the Roland driver does. The lights of the device show that it is ready.
 - A log line for each USB callback delay longer than 20 ms.
 - Removed the experimental scheduling modes (one of them could block the audio service for 60 s).
 - The stored tuning values of older versions are ignored.
