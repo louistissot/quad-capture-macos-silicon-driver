@@ -30,7 +30,7 @@ Macs with macOS 12 or earlier. With this driver, the QUAD-CAPTURE operates on Ap
 
 ## Status
 
-Version 1.0.0. See [CHANGELOG.md](CHANGELOG.md).
+Version 1.0.1. See [CHANGELOG.md](CHANGELOG.md).
 
 | Configuration | Status |
 |---|---|

@@ -1,5 +1,10 @@
 # Change log
 
+## 1.0.1
+
+- QuadCapture Panel has an app icon (an original drawing of an audio interface; not a Roland
+  logo). Before, the app showed the empty default icon.
+
 ## 1.0.0
 
 - New app **QuadCapture Panel** (in the Applications folder): preamp (SENS, LO-CUT, PHASE,
